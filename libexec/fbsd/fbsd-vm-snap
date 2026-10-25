@@ -1,0 +1,113 @@
+#!/bin/sh
+# summary: offline qcow2 snapshots of the VM disk (save list revert delete)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd vm snap save [-n] [name]     create a snapshot (default name:
+                                         snap-YYYYmmdd-HHMMSS)
+       fbsd vm snap list [-n]            list snapshots
+       fbsd vm snap revert [-nf] name    roll the disk back to a snapshot
+       fbsd vm snap delete [-nf] name    delete a snapshot
+
+Internal qcow2 snapshots made with qemu-img snapshot. The VM must be off
+(fbsd vm down), so a snapshot always holds a cleanly shut down disk.
+revert and delete are destructive: they need -f.
+Names may contain A-Z a-z 0-9 . _ -
+
+Examples:
+  fbsd vm snap save pre-guest-prep
+  fbsd vm snap list
+  fbsd -n vm snap revert -f pre-guest-prep
+EOF
+}
+
+[ $# -gt 0 ] || usage_error "missing subcommand"
+sub=$1
+shift
+case $sub in
+-h | help) usage && exit 0 ;;
+save | list | revert | delete) ;;
+*) usage_error "unknown snap subcommand: $sub" ;;
+esac
+
+force=0
+while getopts nhf opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	f) force=1 ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+
+name=''
+case $sub in
+list) [ $# -eq 0 ] || usage_error "unexpected argument: $1" ;;
+save)
+	[ $# -le 1 ] || usage_error "unexpected argument: $2"
+	name=${1:-snap-$(date +%Y%m%d-%H%M%S)}
+	;;
+revert | delete)
+	[ $# -eq 1 ] || usage_error "$sub needs exactly one snapshot name"
+	name=$1
+	;;
+esac
+case $name in
+*[!A-Za-z0-9._-]* | -*) usage_error "invalid snapshot name: $name" ;;
+esac
+
+fbsd_load_config
+need_cmd qemu-img qemu-img
+[ -f "$FBSD_DISK" ] || die "disk not found: $FBSD_DISK" "set FBSD_DISK"
+
+# snap_exists name: read-only probe of the snapshot table (TAG is column 2).
+snap_exists() {
+	qemu-img snapshot -l "$FBSD_DISK" 2>/dev/null |
+		awk -v n="$1" 'NR > 2 && $2 == n { found = 1 } END { exit !found }'
+}
+
+if [ "$sub" != list ] && vm_running; then
+	die "VM $FBSD_VM_NAME is running; snapshots are taken with the VM off" "fbsd vm down"
+fi
+
+case $sub in
+list)
+	if is_dryrun; then
+		run qemu-img snapshot -l "$FBSD_DISK"
+	else
+		out=$(run qemu-img snapshot -l "$FBSD_DISK")
+		if [ -n "$out" ]; then printf '%s\n' "$out"; else info "no snapshots in $FBSD_DISK"; fi
+	fi
+	;;
+save)
+	if snap_exists "$name"; then
+		die "snapshot '$name' already exists" "pick another name, or delete it with: fbsd vm snap delete -f $name"
+	fi
+	run qemu-img snapshot -c "$name" "$FBSD_DISK"
+	is_dryrun || info "saved snapshot '$name' of $FBSD_DISK"
+	;;
+revert | delete)
+	snap_exists "$name" || die "no snapshot named '$name'" "fbsd vm snap list"
+	if [ "$force" != 1 ] && ! is_dryrun; then
+		case $sub in
+		revert) die "revert discards every change made to the disk since '$name'" "add -f to confirm" ;;
+		delete) die "delete removes snapshot '$name' for good" "add -f to confirm" ;;
+		esac
+	fi
+	case $sub in
+	revert)
+		run qemu-img snapshot -a "$name" "$FBSD_DISK"
+		is_dryrun || info "disk reverted to '$name'"
+		;;
+	delete)
+		run qemu-img snapshot -d "$name" "$FBSD_DISK"
+		is_dryrun || info "deleted snapshot '$name'"
+		;;
+	esac
+	;;
+esac
