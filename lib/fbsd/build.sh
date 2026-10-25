@@ -2,31 +2,67 @@
 # build.sh: run long guest jobs with a full log on the host, and read the
 # serial console log.
 
+# Long guest jobs run detached under daemon(8), so a dropped ssh connection
+# (or a restarted host shell) does not kill them. One job at a time, in
+# FBSD_GUEST_JOBDIR: script.sh, log (all output), rc (exit status, written
+# last), hostlog (where the host copy lives). The host polls the log.
+FBSD_GUEST_JOBDIR=/var/tmp/fbsd-job
+
 # guest_logged log filter 'script'
-#   Run a FreeBSD sh script in the guest. Its whole output goes to the host
-#   file $log; only lines matching the extended regex $filter (empty: all
-#   lines) are shown live. On failure, print the first error and the tail.
-#   Returns the script's exit status.
+#   Start a FreeBSD sh script as a detached guest job and follow it: the
+#   whole output is copied to the host file $log; only lines matching the
+#   extended regex $filter (empty: all lines) are shown live. On failure,
+#   print the first error and the tail. Returns the script's exit status.
 guest_logged() {
 	_log=$1 _filter=$2 _script=$3
+	# shellcheck disable=SC2016 # expanded by the guest shell
+	_start="d=$FBSD_GUEST_JOBDIR hostlog=$(shquote "$_log")
+script=$(shquote "$_script")"'
+set -eu
+if [ -f "$d/pid" ] && [ ! -f "$d/rc" ] && pgrep -F "$d/pid" >/dev/null 2>&1; then
+	echo "fbsd: a guest job is already running (host log: $(cat "$d/hostlog"))" >&2
+	exit 75
+fi
+rm -rf "$d"
+mkdir -p "$d"
+printf "%s\n" "$script" >"$d/script.sh"
+printf "%s\n" "$hostlog" >"$d/hostlog"
+daemon -p "$d/pid" -o "$d/log" /bin/sh -c "/bin/sh $d/script.sh; echo \$? >$d/rc.tmp; mv $d/rc.tmp $d/rc"'
 	if is_dryrun; then
-		guest_sh run "$_script"
-		note "output saved to $_log"
+		guest_sh run "$_start"
+		note "follow: copy $FBSD_GUEST_JOBDIR/log to $_log every 3 s until $FBSD_GUEST_JOBDIR/rc exists"
 		return 0
 	fi
 	mkdir -p "$(dirname -- "$_log")"
-	_rcfile=$(mktemp)
-	_t0=$(date +%s)
-	info "full log: $_log"
-	{
-		_rc=0
-		guest_sh run "$_script" </dev/null || _rc=$?
-		echo "$_rc" >"$_rcfile"
-	} 2>&1 | tee "$_log" | {
-		if [ -n "$_filter" ]; then grep --line-buffered -E "$_filter" || :; else cat; fi
-	}
-	_rc=$(cat "$_rcfile")
-	rm -f "$_rcfile"
+	: >"$_log"
+	info "full log: $_log (the job runs detached; reattach with: fbsd build -a)"
+	guest_sh run "$_start" </dev/null || return $?
+	guest_follow "$_log" "$_filter"
+}
+
+# guest_follow log filter: copy the guest job's log to $log as it grows,
+# show matching lines, return the job's exit status once it has one.
+guest_follow() {
+	_log=$1 _filter=$2
+	_t0=$(date +%s) _fails=0
+	_chunk=$(mktemp)
+	while :; do
+		_rc=$(guest_ssh probe "cat $FBSD_GUEST_JOBDIR/rc 2>/dev/null" 2>/dev/null) || _rc=''
+		_size=$(wc -c <"$_log" | tr -d ' ')
+		if guest_ssh probe "tail -c +$((_size + 1)) $FBSD_GUEST_JOBDIR/log" >"$_chunk" 2>/dev/null; then
+			_fails=0
+			cat "$_chunk" >>"$_log"
+			if [ -n "$_filter" ]; then grep -E "$_filter" "$_chunk" || :; else cat "$_chunk"; fi
+		else
+			_fails=$((_fails + 1))
+			[ "$_fails" -lt 60 ] || {
+				rm -f "$_chunk"
+				die "lost contact with the guest for 3 minutes; the job may still run" "fbsd build -a"
+			}
+		fi
+		case $_rc in '' | *[!0-9]*) sleep 3 ;; *) break ;; esac
+	done
+	rm -f "$_chunk"
 	_secs=$(($(date +%s) - _t0))
 	if [ "$_rc" -eq 0 ]; then
 		info "done in $((_secs / 60))m$((_secs % 60))s"
@@ -35,6 +71,17 @@ guest_logged() {
 		warn "failed (exit $_rc) after $((_secs / 60))m$((_secs % 60))s; full log: $_log"
 	fi
 	return "$_rc"
+}
+
+# guest_attach: follow a job started earlier (after a host disconnect).
+guest_attach() {
+	_hl=$(guest_ssh probe "cat $FBSD_GUEST_JOBDIR/hostlog" 2>/dev/null) ||
+		die "no guest job to attach to" "start one with fbsd build"
+	[ -n "$_hl" ] || die "no guest job to attach to"
+	mkdir -p "$(dirname -- "$_hl")"
+	: >"$_hl"
+	info "attaching; full log: $_hl"
+	guest_follow "$_hl" '^>>> '
 }
 
 # log_failure log: print the first error line (with context) and the tail.

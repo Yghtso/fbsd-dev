@@ -10,6 +10,7 @@ set -eu
 usage() {
 	cat <<EOF
 usage: fbsd build [-nf] [-k kernconf] [-j jobs] world|kernel|<subdir> [-- make args]
+       fbsd build -a
 
 Build in the guest as FBSD_SSH_USER (never root), in FBSD_SRC with objects
 in FBSD_OBJ (WITH_META_MODE makes rebuilds incremental):
@@ -18,7 +19,8 @@ in FBSD_OBJ (WITH_META_MODE makes rebuilds incremental):
   <subdir>  make -C FBSD_SRC/<subdir>, with the installed toolchain and
             headers (e.g. sys/modules/zfs, bin/ls, lib/libc/tests)
 
-The full output is saved on the host in FBSD_LOGDIR/build/; only the
+The build runs detached in the guest (daemon(8)), so it survives a dropped
+ssh connection; -a reattaches to it. The full output is saved on the host in FBSD_LOGDIR/build/; only the
 '>>>' stage lines are shown live (-f shows everything). On failure the
 first error and the last lines of the log are printed.
 
@@ -27,6 +29,7 @@ successful build are shown (the commit is kept in FBSD_WORKDIR/state).
 
 Options:
   -n            dry run: print the ssh command and guest script
+  -a            reattach to the running (or last) guest job and follow it
   -f            show the full build output live
   -k kernconf   kernel config (default FBSD_KERNCONF=$FBSD_KERNCONF_HELP)
   -j jobs       make -j (default FBSD_JOBS)
@@ -42,11 +45,12 @@ EOF
 }
 
 FBSD_KERNCONF_HELP=${FBSD_KERNCONF:-GENERIC}
-full=0 kernconf='' jobs=''
-while getopts nhfk:j: opt; do
+full=0 kernconf='' jobs='' attach=0
+while getopts nhafk:j: opt; do
 	case $opt in
 	n) FBSD_DRYRUN=1 ;;
 	h) usage && exit 0 ;;
+	a) attach=1 ;;
 	f) full=1 ;;
 	k) kernconf=$OPTARG ;;
 	j)
@@ -57,6 +61,31 @@ while getopts nhfk:j: opt; do
 	esac
 done
 shift $((OPTIND - 1))
+
+# record_rev log: after a successful build, remember the commit it used.
+record_rev() {
+	rev=$(sed -n 's/^fbsd-build-rev=//p' "$1" | head -n 1)
+	case $rev in
+	'' | unknown) ;;
+	*)
+		mkdir -p "$(dirname -- "$state")"
+		printf '%s\n' "$rev" >"$state"
+		info "built commit $(printf '%.12s' "$rev")"
+		;;
+	esac
+}
+
+if [ "$attach" = 1 ]; then
+	[ $# -eq 0 ] || usage_error "-a takes no target"
+	fbsd_load_config
+	state=$FBSD_WORKDIR/state/$FBSD_VM_NAME.last-build-rev
+	is_dryrun && { note "follow $FBSD_GUEST_JOBDIR/log of the running guest job"; exit 0; }
+	rc=0
+	guest_attach || rc=$?
+	hl=$(guest_ssh probe "cat $FBSD_GUEST_JOBDIR/hostlog")
+	[ "$rc" -ne 0 ] || record_rev "$hl"
+	exit "$rc"
+fi
 [ $# -gt 0 ] || usage_error "missing target: world, kernel or a subdirectory"
 target=$1
 shift
@@ -133,12 +162,4 @@ if is_dryrun; then
 	exit 0
 fi
 [ "$rc" -eq 0 ] || exit "$rc"
-rev=$(sed -n 's/^fbsd-build-rev=//p' "$log" | head -n 1)
-case $rev in
-'' | unknown) ;;
-*)
-	mkdir -p "$(dirname -- "$state")"
-	printf '%s\n' "$rev" >"$state"
-	info "built commit $(printf '%.12s' "$rev")"
-	;;
-esac
+record_rev "$log"

@@ -10,7 +10,8 @@ load helper
 	[[ $output == *"set -- -j8 buildworld"* ]]
 	[[ $output == *'exec make "$@"'* ]]
 	[[ $output != *"sudo"* ]]
-	[[ $output == *"output saved to $XDG_DATA_HOME/fbsd/log/build/"*"-world.log"* ]]
+	[[ $output == *"follow: copy /var/tmp/fbsd-job/log to $XDG_DATA_HOME/fbsd/log/build/"*"-world.log"* ]]
+	[[ $output == *'daemon -p "$d/pid" -o "$d/log"'* ]]
 	run "$FBSD" -n build -k MYKERNEL -j 3 kernel -- -DNO_KERNELCLEAN
 	[[ $output == *"set -- -j3 buildkernel KERNCONF=MYKERNEL -DNO_KERNELCLEAN"* ]]
 	FBSD_MAKE_ARGS='-DWITHOUT_TESTS -s' run "$FBSD" -n build sys/modules/if_vtnet
