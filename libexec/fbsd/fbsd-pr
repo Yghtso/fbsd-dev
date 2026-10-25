@@ -1,0 +1,126 @@
+#!/bin/sh
+# summary: prepare the current branch for a GitHub pull request (never pushes)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd pr [-n]
+
+Prepare the branch checked out in FBSD_SRC (in the guest) for a pull request
+against freebsd/freebsd-src. It never pushes; it prints the push command.
+  1. refuse to run on main, stable/*, releng/* or with uncommitted changes
+  2. git fetch origin, then git rebase origin/main (stops on a conflict and
+     tells you how to continue or abort)
+  3. list the commits and the diffstat against origin/main
+  4. fbsd check -r origin/main..HEAD: style(9), Signed-off-by and email
+     rules of the project's PR checklist, mandoc -Tlint, path notes
+  5. print the git push command for your fork remote (the first remote
+     that is not 'origin'; --force-with-lease if the rebase rewrote commits
+     already on the fork) and the GitHub compare URL
+
+Network access: git fetch from origin (in the guest).
+
+Options:
+  -n  dry run: print the guest script
+
+Examples:
+  fbsd pr
+  fbsd -n pr
+EOF
+}
+
+while getopts nh opt; do
+	case $opt in
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
+	h) usage; exit 0 ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+fbsd_load_config
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+script="src=$(shquote "$FBSD_SRC")"'
+set -eu
+cd "$src"
+branch=$(git symbolic-ref --quiet --short HEAD) || { echo "fbsd: detached HEAD; check out a topic branch first" >&2; exit 2; }
+case $branch in
+main | stable/* | releng/*)
+	echo "fbsd: you are on $branch; put your work on a topic branch first: git switch -c my-fix" >&2
+	exit 2
+	;;
+esac
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+	echo "fbsd: uncommitted changes in $src; commit or stash them first" >&2
+	exit 2
+fi
+echo ">>> git fetch origin"
+git fetch origin
+echo ">>> git rebase origin/main (branch $branch)"
+if ! git rebase origin/main; then
+	echo "fbsd: the rebase stopped on a conflict. Resolve it and run git rebase --continue, or go back with git rebase --abort" >&2
+	exit 1
+fi
+n=$(git rev-list --count origin/main..HEAD)
+[ "$n" -gt 0 ] || { echo "fbsd: no commits on $branch ahead of origin/main" >&2; exit 2; }
+echo ">>> $n commit(s) on $branch"
+git log --reverse --format="%h %s" origin/main..HEAD
+echo ">>> diffstat"
+git diff --stat origin/main..HEAD | tail -n 20
+fork=$(git remote | grep -vx origin | head -n 1 || :)
+echo "fbsd-pr-branch=$branch"
+echo "fbsd-pr-fork=$fork"
+if [ -n "$fork" ]; then
+	echo "fbsd-pr-forkurl=$(git remote get-url "$fork")"
+	# Commits of the branch already on the fork that the rebase replaced?
+	if git rev-parse --quiet --verify "refs/remotes/$fork/$branch" >/dev/null &&
+	    ! git merge-base --is-ancestor "$fork/$branch" HEAD; then
+		echo "fbsd-pr-force=yes"
+	fi
+fi'
+
+if is_dryrun; then
+	guest_sh run "$script"
+	note "then: fbsd check -r origin/main..HEAD, and print the push command"
+	exit 0
+fi
+out=$(guest_sh run "$script") || {
+	rc=$?
+	printf '%s\n' "$out" | grep -v '^fbsd-pr-'
+	exit "$rc"
+}
+printf '%s\n' "$out" | grep -v '^fbsd-pr-'
+val() { printf '%s\n' "$out" | sed -n "s/^fbsd-pr-$1=//p" | head -n 1; }
+branch=$(val branch) fork=$(val fork) url=$(val forkurl) force=$(val force)
+
+checkrc=0
+"$FBSD_ROOT/bin/fbsd" check -r origin/main..HEAD || checkrc=$?
+
+echo
+if [ "$checkrc" -ne 0 ]; then
+	warn "fbsd check found problems; fix them before pushing (git commit --amend, git rebase -i origin/main)"
+fi
+if [ -z "$fork" ]; then
+	info "no fork remote yet. Add yours in the guest, e.g.:"
+	printf '    fbsd ssh %s\n' "$(shquote "git -C $FBSD_SRC remote add fork git@github.com:<you>/freebsd-src.git")"
+	exit "$checkrc"
+fi
+lease=''
+[ "$force" != yes ] || lease=' --force-with-lease'
+info "to publish (fbsd never pushes; run this yourself):"
+printf '    fbsd ssh %s\n' "$(shquote "git -C $FBSD_SRC push$lease -u $fork $branch")"
+owner=$(printf '%s\n' "$url" | sed -n 's#.*github\.com[:/]\([^/]*\)/.*#\1#p')
+if [ -n "$owner" ]; then
+	info "then open: https://github.com/freebsd/freebsd-src/compare/main...$owner:$branch"
+fi
+exit "$checkrc"

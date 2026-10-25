@@ -71,3 +71,34 @@ load helper
 	run "$FBSD" -n check -r 'a;b'
 	[ "$status" -eq 2 ]
 }
+
+@test "kmod -n: user build against the kernel build dir, root kld ops" {
+	run "$FBSD" -n kmod nullfs
+	[ "$status" -eq 0 ]
+	[[ $output == *"dir=sys/modules/nullfs"* ]]
+	[[ $output == *'kbd=$obj$src/$(uname -m).$(uname -p)/sys/$kernconf'* ]]
+	[[ $output == *'$su kldunload $force "$kmod"'* ]]
+	[[ $output == *'$su kldload "$ko"'* ]]
+	[[ $output == *"show_dmesg"* ]]
+	run "$FBSD" -n kmod -F sys/modules/if_vtnet
+	[[ $output == *"force=-f"* && $output == *"dir=sys/modules/if_vtnet"* ]]
+	run "$FBSD" -n kmod ../x
+	[ "$status" -eq 2 ]
+	run "$FBSD" -n kmod a b
+	[ "$status" -eq 2 ]
+}
+
+@test "pr -n: refuses main, rebases, never pushes" {
+	run "$FBSD" -n pr
+	[ "$status" -eq 0 ]
+	[[ $output == *'main | stable/* | releng/*)'* ]]
+	[[ $output == *"git fetch origin"* ]]
+	[[ $output == *"git rebase origin/main"* ]]
+	[[ $output == *"fbsd check -r origin/main..HEAD"* ]]
+	! grep -q 'git push' <<<"$(printf '%s\n' "$output" | grep -v '^#' | grep -v 'echo ')"
+}
+
+@test "pr: push command printed, with --force-with-lease when needed" {
+	grep -q 'push$lease -u $fork $branch' "$BATS_TEST_DIRNAME/../libexec/fbsd/fbsd-pr"
+	grep -q "lease=' --force-with-lease'" "$BATS_TEST_DIRNAME/../libexec/fbsd/fbsd-pr"
+}
