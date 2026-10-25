@@ -1,0 +1,91 @@
+#!/bin/sh
+# summary: run kyua tests from the INSTALLED /usr/tests in the guest
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+. "$FBSD_ROOT/lib/fbsd/build.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd test [-nu] [-i srcdir]... <path>...
+
+Run kyua in the guest against the INSTALLED test suite in /usr/tests, not
+against the build tree: a test you changed in FBSD_SRC only runs here after
+it is installed. Either install a whole new world ('fbsd install world'),
+or rebuild and install just the affected tests directory with -i.
+
+  <path>      test program or directory relative to /usr/tests
+              (e.g. sys/kern, lib/libc/string, sys/kern/kern_descrip_test)
+  -i srcdir   first build that directory of FBSD_SRC as FBSD_SSH_USER
+              (make -C FBSD_SRC/<srcdir>) and install it as root
+              (make install); repeatable. It must be the tests directory
+              that installs into the <path> you run, e.g.
+                -i lib/libc/tests/string  for  lib/libc/string
+                -i tests/sys/kern         for  sys/kern
+  -u          run kyua as FBSD_SSH_USER instead of root (tests that
+              require root are then skipped)
+  -n          dry run: print the ssh command and guest script
+
+kyua runs as root by default (through FBSD_GUEST_SU), as the FreeBSD test
+suite expects. The output is saved on the host in FBSD_LOGDIR/test/, then
+'kyua report' lists failed and broken tests. Exit status 1 if any failed.
+
+Examples:
+  fbsd test sys/kern/kern_descrip_test
+  fbsd test -i lib/libc/tests/string lib/libc/string
+  fbsd -n test sys/kern
+EOF
+}
+
+user_mode=0 srcdirs=''
+while getopts nhui: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	u) user_mode=1 ;;
+	i)
+		case $OPTARG in
+		/* | *..* | -* | '') usage_error "-i takes a directory relative to FBSD_SRC, without '..'" ;;
+		*[!A-Za-z0-9_./+-]*) usage_error "unusual characters in -i $OPTARG" ;;
+		esac
+		srcdirs="${srcdirs:+$srcdirs }$OPTARG"
+		;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -gt 0 ] || usage_error "name at least one test path under /usr/tests (the full suite takes hours)"
+for p do
+	case $p in /* | *..* | -*) usage_error "test path must be relative to /usr/tests, without '..': $p" ;; esac
+done
+
+fbsd_load_config
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+if [ "$user_mode" = 1 ]; then kyua_su=''; else kyua_su=$FBSD_GUEST_SU; fi
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+script="src=$(shquote "$FBSD_SRC") su=$(shquote "$FBSD_GUEST_SU") kyua_su=$(shquote "$kyua_su") jobs=$(shquote "$FBSD_JOBS")
+srcdirs=$(shquote "$srcdirs")
+set -- $(shquote "$@")"'
+set -eu
+for d in $srcdirs; do
+	echo ">>> fbsd: building $d (as $(id -un)) and installing it (as root)"
+	make -C "$src/$d" -j"$jobs"
+	$su make -C "$src/$d" install
+done
+cd /usr/tests
+echo ">>> fbsd: ${kyua_su:-}${kyua_su:+ }kyua test -k /usr/tests/Kyuafile $* (installed tests)"
+rc=0
+$kyua_su kyua test -k /usr/tests/Kyuafile "$@" || rc=$?
+echo ">>> fbsd: kyua report (failed and broken tests)"
+$kyua_su kyua report --results-filter broken,failed || :
+exit "$rc"'
+
+log=$FBSD_LOGDIR/test/$(date +%Y%m%d-%H%M%S)-$(printf '%s' "$1" | tr '/' '_').log
+is_dryrun || info "running kyua on the installed tests: $*"
+guest_logged "$log" '' "$script"
