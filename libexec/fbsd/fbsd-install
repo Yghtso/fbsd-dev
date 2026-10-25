@@ -1,0 +1,113 @@
+#!/bin/sh
+# summary: install a built world+kernel into a new boot environment (beinstall.sh)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+. "$FBSD_ROOT/lib/fbsd/build.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd install world [-nr] [-k kernconf]
+
+Install the world and kernel built by 'fbsd build world' and
+'fbsd build kernel' into a NEW ZFS boot environment, using the source tree's
+own tools/build/beinstall.sh (run as root through FBSD_GUEST_SU). The running
+boot environment is never modified.
+
+beinstall.sh creates the BE <version>-<commit date>, runs installkernel,
+etcupdate and installworld inside it and activates it. Two adjustments for
+this pkgbase system:
+  NO_PKG_UPGRADE=1  beinstall would otherwise run 'pkg upgrade' inside the
+                    new BE, which replaces the world you just installed with
+                    the FreeBSD-* base packages from the package repository
+  bectl activate -t afterwards the previous BE is made the default again and
+                    the new one is activated for the NEXT BOOT ONLY: if it
+                    does not come up, the following boot is back on the old BE
+
+Note: the pkg database inside the new BE still describes the old FreeBSD-*
+packages, so do not run 'pkg upgrade' for base packages in it.
+
+To keep the new BE after testing it:  fbsd ssh sudo bectl activate <name>
+
+Options:
+  -n            dry run: print the ssh command and guest script
+  -r            reboot into the new BE afterwards and report what booted
+  -k kernconf   kernel config to install (default FBSD_KERNCONF)
+
+Examples:
+  fbsd build world && fbsd build kernel && fbsd install world -r
+  fbsd -n install world
+EOF
+}
+
+[ $# -gt 0 ] || usage_error "missing target: world"
+case $1 in
+-h | help) usage && exit 0 ;;
+world) shift ;;
+*) usage_error "unknown install target: $1 (only 'world'; kernels: fbsd ktest)" ;;
+esac
+reboot=0 kernconf=''
+while getopts nhrk: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	r) reboot=1 ;;
+	k) kernconf=$OPTARG ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+fbsd_load_config
+: "${kernconf:=$FBSD_KERNCONF}"
+case $kernconf in '' | *[!A-Za-z0-9_.-]*) usage_error "invalid kernel config name: $kernconf" ;; esac
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+log=$FBSD_LOGDIR/build/$(date +%Y%m%d-%H%M%S)-install-world.log
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+script="$FBSD_GUEST_SU /bin/sh -c $(shquote "src=$(shquote "$FBSD_SRC") kernconf=$(shquote "$kernconf")"'
+set -eu
+cd "$src"
+before=$(mktemp)
+bectl list -H | awk "{print \$1}" >"$before"
+default=$(bectl list -H | awk "\$2 ~ /R/ {print \$1}")
+echo ">>> fbsd: running tools/build/beinstall.sh KERNCONF=$kernconf (NO_PKG_UPGRADE=1)"
+env NO_PKG_UPGRADE=1 sh tools/build/beinstall.sh KERNCONF="$kernconf"
+new=$(bectl list -H | awk "{print \$1}" | grep -vxFf "$before" | head -n 1)
+rm -f "$before"
+[ -n "$new" ] || { echo "fbsd: cannot find the new boot environment"; exit 1; }
+echo ">>> fbsd: keeping $default as the default, booting $new once (bectl activate -t)"
+bectl activate "$default"
+bectl activate -t "$new"
+echo "fbsd-new-be=$new"
+bectl list')"
+
+is_dryrun || info "installing into a new boot environment (log on the host)"
+guest_logged "$log" '^>>> |^Boot environment|^fbsd' "$script"
+if is_dryrun; then
+	[ "$reboot" = 0 ] || guest_reboot
+	exit 0
+fi
+new=$(sed -n 's/^fbsd-new-be=//p' "$log" | tail -n 1)
+info "new boot environment: $new (next boot only)"
+if [ "$reboot" = 0 ]; then
+	info "boot it with: fbsd vm reboot"
+	exit 0
+fi
+guest_reboot
+be=$(guest_ssh probe "bectl list -H | awk '\$2 ~ /N/ {print \$1}'" 2>/dev/null) || be='?'
+ver=$(guest_ssh probe 'freebsd-version -ku | tr "\n" " "' 2>/dev/null) || ver='?'
+if [ "$be" = "$new" ]; then
+	info "booted the new boot environment $new (freebsd-version -ku: $ver)"
+	info "keep it with: fbsd ssh sudo bectl activate $new"
+else
+	warn "booted $be, not the new boot environment $new; the next boot stays on $be"
+	exit 1
+fi
