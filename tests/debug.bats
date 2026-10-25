@@ -27,6 +27,9 @@ load helper
 	[[ $output == *"mode=batch"* ]]
 	[[ $output == *'printf "%s" "$cmds" | kgdb -q "$debug" "vmcore.$n"'* ]]
 	[[ $output == *'zstd -q -d -o "vmcore.$n" "vmcore.$n.zst"'* ]]
+	[[ $output == *"keep=0"* && $output == *'trap "rm -f /var/crash/$tmpcore'* ]]
+	run "$FBSD" -n crash -K
+	[[ $output == *"keep=1"* ]]
 	run "$FBSD" -n crash x
 	[ "$status" -eq 2 ]
 }
@@ -58,6 +61,8 @@ load helper
 	[[ $output == *"contrib: :warning: vendor branch"* ]]
 	[[ $output == *"contrib/foo: review wanted from @someone"* ]]
 	[ "$(grep -c 'missing Signed-off-by' <<<"$output")" -eq 1 ]
+	[[ $output == *"WARNING: .github/workflows/checklist.yml differs"*"the sh rules may be stale"* ]]
+	[[ $output == *"note: .github/path-rules.txt changed since"* ]]
 }
 
 @test "check -n: default range and range validation" {

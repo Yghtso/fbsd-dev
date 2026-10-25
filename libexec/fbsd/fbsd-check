@@ -6,6 +6,14 @@ set -eu
 . "$FBSD_ROOT/lib/fbsd/qemu.sh"
 . "$FBSD_ROOT/lib/fbsd/guest.sh"
 
+# The files the rules below were derived from, with their sha256 at the
+# time (freebsd-src $RULES_COMMIT). Update together with the rules.
+RULES_COMMIT=28ec7cb8712f
+H_CHECKLIST=29bedcf11689ee540c7bc451460ad33f097bf8fc9611170ebd13d24635c9e8ef
+H_STYLE=242edcd7a6154b700df2eaa22b8fd14e27a7000099705e4bd68348dd9050e610
+H_PATHRULES=3eac7bac0fef8caeb88544ec3e7088a2342019294ce0b127405b30c29fbc71e5
+H_CODEOWNERS=919063822016a28316f5b00d109fa08840b31df824f684e925d47750cd0b6a6b
+
 usage() {
 	cat <<EOF
 usage: fbsd check [-n] [-r range]
@@ -24,6 +32,15 @@ workflows check a pull request:
              the changed files (information only)
 There is no tools/build/check-email.sh in the tree; the metadata checks
 above are what the project's own checklist workflow enforces.
+
+Source of the rules: the metadata rules were written in sh from
+.github/workflows/checklist.yml and the style command from
+.github/workflows/style.yml, as of freebsd-src commit $RULES_COMMIT.
+path-rules.txt and CODEOWNERS are read live; only their format
+("path<whitespace>text") is assumed. A warning is printed when the tree's
+copy of any of these files differs from the one the rules were written
+against (sha256 below), meaning the sh rules may be stale:
+$(printf '  %s  %s\n' "$H_CHECKLIST" .github/workflows/checklist.yml "$H_STYLE" .github/workflows/style.yml "$H_PATHRULES" .github/path-rules.txt "$H_CODEOWNERS" .github/CODEOWNERS)
 
 Exit status 1 if style, metadata or mandoc found problems.
 
@@ -57,9 +74,23 @@ if ! is_dryrun; then
 fi
 
 # shellcheck disable=SC2016 # expanded by the guest shell
-script="src=$(shquote "$FBSD_SRC") range=$(shquote "$range")"'
+script="src=$(shquote "$FBSD_SRC") range=$(shquote "$range") rules_commit=$RULES_COMMIT
+pins='.github/workflows/checklist.yml $H_CHECKLIST rules
+.github/workflows/style.yml $H_STYLE rules
+.github/path-rules.txt $H_PATHRULES data
+.github/CODEOWNERS $H_CODEOWNERS data'"'
 set -eu
 cd "$src"
+# Are the files the rules were derived from unchanged?
+printf "%s\n" "$pins" | while read -r f h kind; do
+	now=$(sha256 -q "$f" 2>/dev/null || sha256sum "$f" 2>/dev/null | cut -d" " -f1 || :)
+	[ "$now" != "$h" ] || continue
+	if [ "$kind" = rules ]; then
+		echo "WARNING: $f differs from the copy fbsd check was written against ($rules_commit): the sh rules may be stale; compare with: git diff $rules_commit -- $f"
+	else
+		echo "note: $f changed since $rules_commit (read live; only its format is assumed): git diff $rules_commit -- $f"
+	fi
+done
 commits=$(git rev-list --reverse "$range")
 if [ -z "$commits" ]; then
 	echo "no commits in $range"
