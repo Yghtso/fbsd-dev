@@ -95,7 +95,7 @@ load helper
 	[[ $output == *"git fetch origin"* ]]
 	[[ $output == *"git rebase origin/main"* ]]
 	[[ $output == *"fbsd check -r origin/main..HEAD"* ]]
-	! grep -q 'git push' <<<"$(printf '%s\n' "$output" | grep -v '^#' | grep -v 'echo ')"
+	[ "$(printf '%s\n' "$output" | grep -v '^#' | grep -v 'echo ' | grep -c 'git push')" -eq 0 ]
 }
 
 @test "pr: push command printed, with --force-with-lease when needed" {
