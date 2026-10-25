@@ -1,0 +1,79 @@
+#!/bin/sh
+# fbsd: entry point. Dispatches `fbsd [global options] <cmd> [<sub>] [args]`
+# to libexec/fbsd/fbsd-<cmd>-<sub> if it exists, else libexec/fbsd/fbsd-<cmd>.
+set -eu
+
+FBSD_ROOT=$(dirname -- "$(dirname -- "$(readlink -f -- "$0")")")
+export FBSD_ROOT
+# shellcheck source=lib/fbsd/common.sh
+. "$FBSD_ROOT/lib/fbsd/common.sh"
+libexec=$FBSD_ROOT/libexec/fbsd
+
+usage() {
+	cat <<EOF
+usage: fbsd [-nv] [-C config] <command> [args]
+
+Personal toolkit for FreeBSD-CURRENT development in a QEMU/KVM guest.
+
+Global options (every command also accepts -n and -h itself):
+  -n         dry run: print the exact commands, change nothing
+  -v         verbose: print each command before running it
+  -C config  use this config file instead of
+             \${XDG_CONFIG_HOME:-~/.config}/fbsd/fbsd.conf
+  -h         this help
+
+Commands:
+EOF
+	for f in "$libexec"/fbsd-*; do
+		[ -x "$f" ] || continue
+		name=${f##*/fbsd-}
+		summary=$(sed -n 's/^# summary: //p' "$f" | head -n 1)
+		printf '  %-14s %s\n' "$(printf '%s' "$name" | tr '-' ' ')" "$summary"
+	done
+	cat <<EOF
+
+Run 'fbsd <command> -h' for details. Examples:
+  fbsd doctor
+  fbsd -n vm up
+  fbsd ssh uname -a
+EOF
+}
+
+while getopts ':nvC:h' opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	v) FBSD_VERBOSE=1 ;;
+	C) FBSD_CONFIG=$OPTARG && export FBSD_CONFIG ;;
+	h) usage && exit 0 ;;
+	:) usage_error "-$OPTARG needs an argument" ;;
+	*) usage_error "unknown option -$OPTARG" ;;
+	esac
+done
+shift $((OPTIND - 1))
+export FBSD_DRYRUN FBSD_VERBOSE
+
+[ $# -gt 0 ] || {
+	usage >&2
+	exit 2
+}
+cmd=$1
+shift
+case $cmd in
+help) usage && exit 0 ;;
+'' | *[!a-z0-9]*) usage_error "invalid command name: $cmd" ;;
+esac
+
+if [ $# -gt 0 ]; then
+	case $1 in
+	'' | *[!a-z0-9]*) ;;
+	*)
+		if [ -x "$libexec/fbsd-$cmd-$1" ]; then
+			sub=$1
+			shift
+			exec "$libexec/fbsd-$cmd-$sub" "$@"
+		fi
+		;;
+	esac
+fi
+[ -x "$libexec/fbsd-$cmd" ] || die "unknown command: $cmd" "run 'fbsd help'"
+exec "$libexec/fbsd-$cmd" "$@"

@@ -1,0 +1,45 @@
+#!/bin/sh
+# summary: show the effective configuration and where each value comes from
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd config [-n] [-h]
+
+Print every configuration key, its value and its source:
+default, file (the config file) or env (environment, which wins).
+Read-only; -n changes nothing here.
+
+Examples:
+  fbsd config
+  FBSD_CPUS=4 fbsd config | grep CPUS
+EOF
+}
+
+while getopts nh opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+fbsd_load_config
+printf '# config file: %s%s\n' "$FBSD_CONFIG_FILE" \
+	"$([ -f "$FBSD_CONFIG_FILE" ] || printf ' (not present)')"
+for k in $FBSD_KEYS; do
+	case " $FBSD_FROM_ENV " in
+	*" $k "*) src='env' ;;
+	*)
+		case " $FBSD_FROM_FILE " in
+		*" $k "*) src='file' ;;
+		*) src='default' ;;
+		esac
+		;;
+	esac
+	printf '%s=%s\t# %s\n' "$k" "$(shquote "$(getvar "$k")")" "$src"
+done

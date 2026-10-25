@@ -1,0 +1,37 @@
+# fbsd.conf: copy to ${XDG_CONFIG_HOME:-~/.config}/fbsd/fbsd.conf
+#
+# Plain KEY=value lines, read with `.` by POSIX sh. Every key is optional.
+# Precedence: environment > this file > built-in default (shown below).
+# Defaults are applied after this file, so a value here may use $HOME or
+# $XDG_* but not another FBSD_* key that you left at its default.
+# `fbsd config` shows the effective values and where each came from.
+
+# --- VM ---
+#FBSD_VM_NAME=fbsd-dev
+#FBSD_WORKDIR=$HOME/.local/share/fbsd        # ${XDG_DATA_HOME}/fbsd
+#FBSD_DISK=$HOME/.local/share/fbsd/fbsd-dev.qcow2
+#FBSD_RUNDIR=/run/user/1000/fbsd              # ${XDG_RUNTIME_DIR}/fbsd: pidfile, sockets
+#FBSD_LOGDIR=$HOME/.local/share/fbsd/log      # console log, build logs
+#FBSD_CPUS=8
+#FBSD_MEM=8G
+#FBSD_FIRMWARE=uefi                           # uefi or bios
+#FBSD_OVMF_CODE=/usr/share/edk2/x64/OVMF_CODE.4m.fd
+#FBSD_OVMF_VARS_TEMPLATE=/usr/share/edk2/x64/OVMF_VARS.4m.fd
+#FBSD_OVMF_VARS=$HOME/.local/share/fbsd/fbsd-dev.OVMF_VARS.fd
+#FBSD_BOOT_TIMEOUT=300                        # seconds to wait for sshd
+#FBSD_SHUTDOWN_TIMEOUT=120                    # seconds to wait for ACPI shutdown
+
+# --- access ---
+#FBSD_SSH_PORT=2222                           # 127.0.0.1:PORT -> guest :22
+#FBSD_SSH_USER=$USER
+#FBSD_SSH_KEY=$HOME/.ssh/id_ed25519
+#FBSD_GDB_PORT=1234                           # gdbstub on 127.0.0.1:PORT
+#FBSD_GUEST_SU=sudo                           # sudo or doas
+
+# --- build ---
+#FBSD_SRC=/usr/src
+#FBSD_OBJ=/usr/obj
+#FBSD_KERNCONF=GENERIC
+#FBSD_TESTKERNEL=kernel.test                  # KODIR=/boot/kernel.test
+#FBSD_JOBS=8                                  # default: FBSD_CPUS
+#FBSD_MAKE_ARGS=
