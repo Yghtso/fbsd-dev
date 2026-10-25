@@ -34,7 +34,7 @@ load helper
 }
 
 @test "every command supports -h" {
-	for c in config doctor ssh vm "vm snap" "vm prep" "vm create"; do
+	for c in config doctor ssh vm "vm snap" "vm prep" "vm create" build install ktest test; do
 		# shellcheck disable=SC2086 # "vm snap" must split into two words
 		run "$FBSD" $c -h
 		[ "$status" -eq 0 ]
