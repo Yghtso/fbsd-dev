@@ -22,19 +22,22 @@ the first time, none after):
      vfs.zfs.arc.max=FBSD_GUEST_ARC_MAX, and for panics
      debug.debugger_on_panic=0 (dump and reboot, no ddb; fbsd ktest --ddb
      turns ddb on for one boot) and debug.trace_on_panic=1
-  4. FBSD_SRC and FBSD_OBJ owned by FBSD_SSH_USER, so builds and git run
+  4. rc.conf: ntpd_enable, ntpd_sync_on_start (the clock jumps after the
+     host suspends), dumpon_flags=-Z (zstd-compressed kernel dumps);
+     applied now with service ntpd start / service dumpon start
+  5. FBSD_SRC and FBSD_OBJ owned by FBSD_SSH_USER, so builds and git run
      unprivileged
-  5. sshd: PasswordAuthentication and KbdInteractiveAuthentication off
+  6. sshd: PasswordAuthentication and KbdInteractiveAuthentication off
      (only if sshd -T says they are on; sshd_config is backed up, the new
      config is checked with sshd -t, then sshd is reloaded)
 Then as FBSD_SSH_USER:
-  6. full git clone of FBSD_SRC_URL into FBSD_SRC as origin (skipped if
+  7. full git clone of FBSD_SRC_URL into FBSD_SRC as origin (skipped if
      FBSD_SRC is already a git checkout). Network access: the guest fetches
      the FreeBSD repository, several GB.
 
 Options:
   -n  dry run: print the exact ssh commands and guest scripts
-  -S  skip the source clone (step 6)
+  -S  skip the source clone (step 7)
 
 Examples:
   fbsd -n vm prep
@@ -45,7 +48,7 @@ EOF
 skip_clone=0
 while getopts nhS opt; do
 	case $opt in
-	n) FBSD_DRYRUN=1 ;;
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
 	h) usage && exit 0 ;;
 	S) skip_clone=1 ;;
 	*) usage_error "unknown option" ;;
@@ -149,6 +152,22 @@ for d in "$src" "$obj"; do
 	fi
 done
 
+# ntpd with a step at start: after the host suspends, the guest clock is
+# behind, which confuses make and META_MODE timestamps. Compressed (zstd)
+# kernel dumps: the 1 GiB swap then holds much larger dumps.
+for kv in ntpd_enable=YES ntpd_sync_on_start=YES dumpon_flags=-Z; do
+	if [ "$(sysrc -n "${kv%%=*}")" = "${kv#*=}" ]; then
+		say "rc.conf already has $kv"
+	else
+		sysrc "$kv" >/dev/null
+		say "rc.conf: set $kv"
+	fi
+done
+service ntpd status >/dev/null 2>&1 || service ntpd start
+say "ntpd: $(service ntpd status 2>&1 | head -n 1)"
+service dumpon start >/dev/null
+say "dump device: $(dumpon -l) (dumpon_flags=$(sysrc -n dumpon_flags))"
+
 auth=$(sshd -T | awk "tolower(\$1) == \"passwordauthentication\" || tolower(\$1) == \"kbdinteractiveauthentication\" { print \$1 \"=\" \$2 }")
 case $auth in
 *=yes*)
@@ -175,12 +194,12 @@ else
 fi
 '
 
-is_dryrun || info "step 1-5 as root via $FBSD_GUEST_SU (you may be asked for your guest password once)"
-guest_ssh tty "$FBSD_GUEST_SU /bin/sh -c $(shquote "$root_script")"
+is_dryrun || info "steps 1-6 as root via $FBSD_GUEST_SU (you may be asked for your guest password once)"
+guest_root_sh tty "$root_script"
 if [ "$skip_clone" = 1 ]; then
 	is_dryrun || info "skipping the source clone (-S)"
 else
-	is_dryrun || info "step 6: git clone $FBSD_SRC_URL into $FBSD_SRC (several GB)"
+	is_dryrun || info "step 7: git clone $FBSD_SRC_URL into $FBSD_SRC (several GB)"
 	guest_sh tty "$clone_script"
 fi
 is_dryrun || info "guest prepared; check with: fbsd doctor"

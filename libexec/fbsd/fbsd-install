@@ -26,8 +26,12 @@ this pkgbase system:
                     the new one is activated for the NEXT BOOT ONLY: if it
                     does not come up, the following boot is back on the old BE
 
-Note: the pkg database inside the new BE still describes the old FreeBSD-*
-packages, so do not run 'pkg upgrade' for base packages in it.
+Afterwards, inside the new BE: /etc/fbsd-world records the commit, and the
+FreeBSD-base repository is disabled in /usr/local/etc/pkg/repos/FreeBSD.conf
+(the old file is kept as FreeBSD.conf.fbsd-bak), so 'pkg upgrade' there
+only touches ports packages. The pkg database still lists the FreeBSD-*
+packages of the image; leave them alone. 'fbsd doctor' warns if the base
+repository is enabled in a source-built BE.
 
 To keep the new BE after testing it:  fbsd ssh sudo bectl activate <name>
 
@@ -51,7 +55,7 @@ esac
 reboot=0 kernconf=''
 while getopts nhrk: opt; do
 	case $opt in
-	n) FBSD_DRYRUN=1 ;;
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
 	h) usage && exit 0 ;;
 	r) reboot=1 ;;
 	k) kernconf=$OPTARG ;;
@@ -71,23 +75,42 @@ fi
 
 log=$FBSD_LOGDIR/build/$(date +%Y%m%d-%H%M%S)-install-world.log
 
+# The job runs as FBSD_SSH_USER and hands one root script to FBSD_GUEST_SU
+# through a here-document, so the dry run reads like what you would type.
 # shellcheck disable=SC2016 # expanded by the guest shell
-script="$FBSD_GUEST_SU /bin/sh -c $(shquote "src=$(shquote "$FBSD_SRC") kernconf=$(shquote "$kernconf")"'
+script="$FBSD_GUEST_SU /bin/sh -s <<'FBSD_ROOT'
+src=$(shquote "$FBSD_SRC") kernconf=$(shquote "$kernconf")"'
 set -eu
 cd "$src"
+rev=$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 before=$(mktemp)
 bectl list -H | awk "{print \$1}" >"$before"
 default=$(bectl list -H | awk "\$2 ~ /R/ {print \$1}")
 echo ">>> fbsd: running tools/build/beinstall.sh KERNCONF=$kernconf (NO_PKG_UPGRADE=1)"
-env NO_PKG_UPGRADE=1 sh tools/build/beinstall.sh KERNCONF="$kernconf"
+# </dev/null: the rest of this here-document must not be read as answers
+# by anything interactive inside (etcupdate resolve).
+env NO_PKG_UPGRADE=1 sh tools/build/beinstall.sh KERNCONF="$kernconf" </dev/null
 new=$(bectl list -H | awk "{print \$1}" | grep -vxFf "$before" | head -n 1)
 rm -f "$before"
 [ -n "$new" ] || { echo "fbsd: cannot find the new boot environment"; exit 1; }
+# Mark the BE as source-built and turn off the pkgbase base repository in
+# it, so pkg upgrade there only touches ports packages.
+mnt=$(mktemp -d)
+bectl mount "$new" "$mnt" >/dev/null
+printf "%s\n" "world installed from $src at $rev by fbsd install world, $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$mnt/etc/fbsd-world"
+repos=$mnt/usr/local/etc/pkg/repos
+mkdir -p "$repos"
+[ ! -f "$repos/FreeBSD.conf" ] || cp -p "$repos/FreeBSD.conf" "$repos/FreeBSD.conf.fbsd-bak"
+printf "%s\n" "# fbsd install world: this BE has a source-built world" "FreeBSD-base: { enabled: no }" >"$repos/FreeBSD.conf"
+bectl umount "$new"
+rmdir "$mnt"
+echo ">>> fbsd: marked $new as source-built (/etc/fbsd-world), FreeBSD-base repo disabled in it"
 echo ">>> fbsd: keeping $default as the default, booting $new once (bectl activate -t)"
 bectl activate "$default"
 bectl activate -t "$new"
 echo "fbsd-new-be=$new"
-bectl list')"
+bectl list
+FBSD_ROOT'
 
 is_dryrun || info "installing into a new boot environment (log on the host)"
 guest_logged "$log" '^>>> |^Boot environment |^fbsd-new-be=|^fbsd: ' "$script"

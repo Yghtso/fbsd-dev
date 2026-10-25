@@ -59,7 +59,7 @@ done
 ddb=0 install=1 kernconf='' xcmd=''
 while getopts nhdIk:x: opt; do
 	case $opt in
-	n) FBSD_DRYRUN=1 ;;
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
 	h) usage && exit 0 ;;
 	d) ddb=1 ;;
 	I) install=0 ;;

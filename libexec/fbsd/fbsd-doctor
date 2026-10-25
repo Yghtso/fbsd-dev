@@ -16,7 +16,8 @@ Read-only checks, each with a fix when it fails:
          free host ports
   guest  (only when the VM is running) sshd reachable, the source tree at
          FBSD_SRC, git, perl, sudo/doas, filemon, WITH_META_MODE, dumpdev,
-         swap, panic behaviour, ZFS ARC limit, pool free space
+         swap, panic behaviour, dump compression, ntpd, pkg base repo vs a
+         source-built world, ZFS ARC limit, pool free space
 
 With -n the guest probe is printed (as the exact ssh command) instead of run.
 Exit status: 0 if nothing failed, 1 otherwise. Warnings do not fail.
@@ -29,7 +30,7 @@ EOF
 
 while getopts nh opt; do
 	case $opt in
-	n) FBSD_DRYRUN=1 ;;
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
 	h) usage && exit 0 ;;
 	*) usage_error "unknown option" ;;
 	esac
@@ -134,6 +135,11 @@ if grep -qs "^WITH_META_MODE" /etc/src-env.conf; then echo meta_mode=yes; else e
 echo "dumpdev=$(sysrc -n dumpdev 2>/dev/null)"
 if sudo -n true 2>/dev/null; then echo sudo_nopw=yes; else echo sudo_nopw=no; fi
 if doas -n true 2>/dev/null; then echo doas_nopw=yes; else echo doas_nopw=no; fi
+if [ -f /etc/fbsd-world ]; then echo srcworld=yes; else echo srcworld=no; fi
+echo "baserepo=$(pkg -vv 2>/dev/null | awk "/^  FreeBSD-base:/ {b = 1} b && /enabled/ {gsub(/[ ,]/, \"\", \$3); print \$3; exit}")"
+echo "be=$(bectl list -H 2>/dev/null | awk "\$2 ~ /N/ {print \$1}")"
+if service ntpd status >/dev/null 2>&1; then echo ntpd=yes; else echo ntpd=no; fi
+echo "dumpflags=$(sysrc -n dumpon_flags 2>/dev/null)"
 echo "pool=$(zpool list -H -o name,free,cap 2>/dev/null | head -n 1)"
 '
 
@@ -194,6 +200,21 @@ else
 fi
 sw=$(val swap)
 if [ -n "$sw" ]; then ok "swap ${sw}K (holds crash dumps)"; else meh "no swap: crash dumps need a dump device" "add a swap partition"; fi
+if [ "$(val srcworld)" = yes ]; then
+	if [ "$(val baserepo)" = yes ]; then
+		meh "boot environment $(val be) has a source-built world but the FreeBSD-base pkg repo is enabled: pkg upgrade would replace your world" \
+			"set FreeBSD-base: { enabled: no } in /usr/local/etc/pkg/repos/FreeBSD.conf in the guest"
+	else
+		ok "source-built world in $(val be); FreeBSD-base repo disabled"
+	fi
+else
+	ok "world from packages in $(val be) (pkgbase)"
+fi
+if [ "$(val ntpd)" = yes ]; then ok "ntpd running"; else meh "ntpd not running: the clock drifts after host suspend" "fbsd vm prep -S"; fi
+case $(val dumpflags) in
+*-Z*) ok "kernel dumps zstd-compressed (dumpon_flags=$(val dumpflags))" ;;
+*) meh "kernel dumps not compressed (dumpon_flags='$(val dumpflags)')" "fbsd vm prep -S" ;;
+esac
 ok "pool: $(val pool)"
 
 [ "$fails" -eq 0 ]

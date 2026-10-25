@@ -52,7 +52,7 @@ EOF
 force=0 plain=0 prep_opts=''
 while getopts nhfPS opt; do
 	case $opt in
-	n) FBSD_DRYRUN=1 ;;
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
 	h) usage && exit 0 ;;
 	f) force=1 ;;
 	P) plain=1 ;;
@@ -191,7 +191,10 @@ runcmd:
   - sysrc kld_list+=filemon
   - kldload -n filemon
   - sysrc dumpdev=AUTO
-  - \"echo '*' | pw usermod -n root -H 0\""
+  - \"echo '*' | pw usermod -n root -H 0\"
+  - sysrc ntpd_enable=YES ntpd_sync_on_start=YES dumpon_flags=-Z
+  - service ntpd start
+  - service dumpon start"
 run xorriso -as mkisofs -quiet -output "$iso" -volid CIDATA -joliet -rock "$seeddir"
 
 # 5. first boot with the seed, then the shared guest preparation
