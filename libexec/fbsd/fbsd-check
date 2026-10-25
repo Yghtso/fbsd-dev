@@ -1,0 +1,132 @@
+#!/bin/sh
+# summary: check your commits before a pull request (style, Signed-off-by, man pages)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd check [-n] [-r range]
+
+Check the commits in <range> (default: origin/main..HEAD, i.e. yours) in
+FBSD_SRC in the guest, as FBSD_SSH_USER, the way freebsd-src's GitHub
+workflows check a pull request:
+  style      tools/build/checkstyle9.pl <range>   (.github/workflows/style.yml)
+  metadata   per commit (.github/workflows/checklist.yml): a Signed-off-by
+             line unless the author is @FreeBSD.org, spelled exactly
+             'Signed-off-by: ', one from the author's own address (warning),
+             and no noreply address
+  man pages  mandoc -Tlint on every manual page the range adds or changes
+             (all messages shown; WARNING and worse fail, STYLE does not)
+  paths      notes from .github/path-rules.txt and .github/CODEOWNERS for
+             the changed files (information only)
+There is no tools/build/check-email.sh in the tree; the metadata checks
+above are what the project's own checklist workflow enforces.
+
+Exit status 1 if style, metadata or mandoc found problems.
+
+Options:
+  -n         dry run: print the guest script
+  -r range   git revision range (e.g. HEAD~3..HEAD)
+
+Examples:
+  fbsd check
+  fbsd check -r HEAD~2..HEAD
+EOF
+}
+
+range=origin/main..HEAD
+while getopts nhr: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
+	h) usage; exit 0 ;;
+	r) range=$OPTARG ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+case $range in -* | *[!A-Za-z0-9_./~^@{}:-]*) usage_error "unusual git range: $range" ;; esac
+
+fbsd_load_config
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+script="src=$(shquote "$FBSD_SRC") range=$(shquote "$range")"'
+set -eu
+cd "$src"
+commits=$(git rev-list --reverse "$range")
+if [ -z "$commits" ]; then
+	echo "no commits in $range"
+	exit 0
+fi
+rc=0
+echo "== commits in $range"
+git log --reverse --format="%h %an <%ae> %s" "$range"
+
+echo "== style(9): tools/build/checkstyle9.pl $range"
+tools/build/checkstyle9.pl --color=never "$range" || rc=1
+
+echo "== commit metadata (Signed-off-by, author email)"
+meta_ok=1
+for c in $commits; do
+	h=$(git log -1 --format=%h "$c")
+	ae=$(git log -1 --format=%ae "$c")
+	lae=$(printf "%s" "$ae" | tr "[:upper:]" "[:lower:]")
+	sob=$(git log -1 --format=%B "$c" | grep -i "^[[:space:]]*signed-off-by:" || :)
+	if [ -z "$sob" ]; then
+		case $lae in
+		*freebsd.org) ;;
+		*) echo "$h: missing Signed-off-by line"; meta_ok=0 ;;
+		esac
+	else
+		if printf "%s\n" "$sob" | grep -qv "Signed-off-by: "; then
+			echo "$h: expected exactly \"Signed-off-by: \""
+			meta_ok=0
+		fi
+		printf "%s\n" "$sob" | grep -qF "$ae" ||
+			echo "$h: warning: no Signed-off-by from the author <$ae>"
+	fi
+	case $lae in *noreply*) echo "$h: a real email address is needed, not $ae"; meta_ok=0 ;; esac
+done
+if [ "$meta_ok" = 1 ]; then echo "ok"; else rc=1; fi
+
+echo "== mandoc -Tlint on changed manual pages"
+pages=$(git diff --name-only --diff-filter=AM "$range" | grep -E "\.[1-9][a-z]?$" || :)
+if [ -z "$pages" ]; then
+	echo "no manual pages changed"
+else
+	for f in $pages; do
+		# Every message is shown; only WARNING and worse fail the check
+		# (STYLE notes such as a manual not installed in the guest do not).
+		out=$(mandoc -Tlint "$f" 2>&1) || :
+		[ -z "$out" ] || printf "%s\n" "$out"
+		if mandoc -Tlint -Wwarning "$f" >/dev/null 2>&1; then
+			echo "ok: $f"
+		else
+			rc=1
+		fi
+	done
+fi
+
+echo "== notes for the changed paths"
+files=$(git diff --name-only "$range")
+notes=0
+while read -r p msg; do
+	case $p in "" | "#"*) continue ;; esac
+	if printf "%s\n" "$files" | grep -q "^$p"; then echo "$p: $msg"; notes=1; fi
+done <.github/path-rules.txt
+while read -r p owners; do
+	case $p in "" | "#"*) continue ;; esac
+	p=${p#/}
+	if printf "%s\n" "$files" | grep -q "^$p"; then echo "$p: review wanted from $owners"; notes=1; fi
+done <.github/CODEOWNERS
+[ "$notes" = 1 ] || echo "none"
+exit "$rc"'
+
+guest_sh run "$script"
