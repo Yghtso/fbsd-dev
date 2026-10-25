@@ -49,7 +49,7 @@ skip_clone=0
 while getopts nhS opt; do
 	case $opt in
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	S) skip_clone=1 ;;
 	*) usage_error "unknown option" ;;
 	esac

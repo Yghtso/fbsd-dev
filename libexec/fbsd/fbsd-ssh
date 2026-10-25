@@ -28,7 +28,7 @@ EOF
 while getopts nh opt; do
 	case $opt in
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	*) usage_error "unknown option" ;;
 	esac
 done

@@ -37,7 +37,7 @@ EOF
 sub=$1
 shift
 case $sub in
--h | help) usage && exit 0 ;;
+-h | help) usage; exit 0 ;;
 up | down | reboot | status | console | monitor | log) ;;
 *) usage_error "unknown vm subcommand: $sub" ;;
 esac
@@ -46,7 +46,7 @@ wait_flag=0 force=0 tail_lines=''
 while getopts nhwft: opt; do
 	case $opt in
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	w) [ "$sub" = up ] || usage_error "-w only applies to 'vm up'"; wait_flag=1 ;;
 	f) [ "$sub" = down ] || usage_error "-f only applies to 'vm down'"; force=1 ;;
 	t)

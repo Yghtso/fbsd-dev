@@ -31,7 +31,7 @@ Options:
                 detach (the guest continues). Repeatable.
 
 Limits: host gdb sees vCPUs as threads, not kernel threads, so helpers that
-walk kernel threads (acttrace, $PCPU) do not work here; module (.ko)
+walk kernel threads (acttrace, \$PCPU) do not work here; module (.ko)
 symbols are not loaded automatically (that needs kgdb, see fbsd crash).
 
 Examples:
@@ -45,7 +45,7 @@ kdir='' srcs=0 xcmds=''
 while getopts nhSk:x: opt; do
 	case $opt in
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	S) srcs=1 ;;
 	k) kdir=$OPTARG ;;
 	x) xcmds="$xcmds$OPTARG

@@ -29,7 +29,7 @@ EOF
 sub=$1
 shift
 case $sub in
--h | help) usage && exit 0 ;;
+-h | help) usage; exit 0 ;;
 save | list | revert | delete) ;;
 *) usage_error "unknown snap subcommand: $sub" ;;
 esac
@@ -38,7 +38,7 @@ force=0
 while getopts nhf opt; do
 	case $opt in
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	f) force=1 ;;
 	*) usage_error "unknown option" ;;
 	esac

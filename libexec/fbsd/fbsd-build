@@ -49,7 +49,7 @@ full=0 kernconf='' jobs='' attach=0
 while getopts nhafk:j: opt; do
 	case $opt in
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	a) attach=1 ;;
 	f) full=1 ;;
 	k) kernconf=$OPTARG ;;

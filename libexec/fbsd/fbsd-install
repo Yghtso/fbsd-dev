@@ -48,7 +48,7 @@ EOF
 
 [ $# -gt 0 ] || usage_error "missing target: world"
 case $1 in
--h | help) usage && exit 0 ;;
+-h | help) usage; exit 0 ;;
 world) shift ;;
 *) usage_error "unknown install target: $1 (only 'world'; kernels: fbsd ktest)" ;;
 esac
@@ -56,7 +56,7 @@ reboot=0 kernconf=''
 while getopts nhrk: opt; do
 	case $opt in
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	r) reboot=1 ;;
 	k) kernconf=$OPTARG ;;
 	*) usage_error "unknown option" ;;

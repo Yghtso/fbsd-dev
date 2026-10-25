@@ -45,7 +45,7 @@ user_mode=0 srcdirs='' full=0
 while getopts nhufi: opt; do
 	case $opt in
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	u) user_mode=1 ;;
 	f) full=1 ;;
 	i)

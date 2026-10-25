@@ -47,7 +47,7 @@ while getopts ':nvC:h' opt; do
 	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
 	v) FBSD_VERBOSE=1 ;;
 	C) FBSD_CONFIG=$OPTARG && export FBSD_CONFIG ;;
-	h) usage && exit 0 ;;
+	h) usage; exit 0 ;;
 	:) usage_error "-$OPTARG needs an argument" ;;
 	*) usage_error "unknown option -$OPTARG" ;;
 	esac
@@ -62,7 +62,7 @@ export FBSD_DRYRUN FBSD_VERBOSE
 cmd=$1
 shift
 case $cmd in
-help) usage && exit 0 ;;
+help) usage; exit 0 ;;
 '' | *[!a-z0-9]*) usage_error "invalid command name: $cmd" ;;
 esac
 
