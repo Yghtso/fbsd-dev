@@ -1,0 +1,113 @@
+#!/bin/sh
+# summary: rebuild a kernel module and reload it in the running guest kernel
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd kmod [-nF] [-k kernconf] <module | sys/modules/path>
+
+Fast loop for module work, no reboot:
+  1. make in FBSD_SRC/sys/modules/<module> as FBSD_SSH_USER, against the
+     kernel build directory of <kernconf> (KERNBUILDDIR=FBSD_OBJ/...
+     /sys/<kernconf>, so options match the kernel you built) if it exists
+  2. if the module is loaded: kldunload it (as root). If that fails, for
+     example because the module is in use (busy), stop and show why
+  3. kldload the freshly built .ko from its object directory (as root)
+  4. show the kernel messages printed meanwhile (dmesg), on success and on
+     failure, and the kldstat line of the loaded module
+
+The module must match the running kernel: after 'fbsd build kernel' boot
+it first (fbsd ktest, or install world). A module compiled into the kernel
+cannot be reloaded.
+
+Options:
+  -n            dry run: print the guest script
+  -k kernconf   kernel config whose build directory to use (FBSD_KERNCONF)
+  -F            kldunload -f: force the unload even if the module says it
+                is busy. Can crash the guest if something still uses it.
+
+Examples:
+  fbsd kmod nullfs
+  fbsd kmod sys/modules/if_vtnet
+  fbsd -n kmod zfs
+EOF
+}
+
+kernconf='' force=''
+while getopts nhFk: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
+	h) usage; exit 0 ;;
+	F) force=-f ;;
+	k) kernconf=$OPTARG ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 1 ] || usage_error "name one module"
+case $1 in
+sys/modules/*) dir=$1 ;;
+*/* | '') usage_error "give a module name or a path under sys/modules: $1" ;;
+*) dir=sys/modules/$1 ;;
+esac
+case $dir in *..* | *[!A-Za-z0-9_./+-]*) usage_error "unusual module path: $dir" ;; esac
+
+fbsd_load_config
+: "${kernconf:=$FBSD_KERNCONF}"
+case $kernconf in '' | *[!A-Za-z0-9_.-]*) usage_error "invalid kernel config name: $kernconf" ;; esac
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+script="src=$(shquote "$FBSD_SRC") obj=$(shquote "$FBSD_OBJ") dir=$(shquote "$dir") kernconf=$(shquote "$kernconf") jobs=$FBSD_JOBS su=$FBSD_GUEST_SU force=$(shquote "$force")"'
+set -eu
+[ -f "$src/$dir/Makefile" ] || { echo "fbsd: no $src/$dir/Makefile" >&2; exit 2; }
+cd "$src/$dir"
+kbd=$obj$src/$(uname -m).$(uname -p)/sys/$kernconf
+if [ -d "$kbd" ]; then set -- "KERNBUILDDIR=$kbd"; else set --; echo "fbsd: no $kbd, building with default options" >&2; fi
+kmod=$(make -V KMOD "$@")
+[ -n "$kmod" ] || { echo "fbsd: $dir does not build a kernel module (no KMOD)" >&2; exit 2; }
+mark=$(dmesg | wc -l)
+show_dmesg() {
+	now=$(dmesg | wc -l)
+	echo ">>> fbsd: kernel messages since the start"
+	if [ "$now" -gt "$mark" ]; then
+		dmesg | tail -n "+$((mark + 1))" | tail -n 40
+	elif [ "$now" -eq "$mark" ]; then
+		echo "(none)"
+	else
+		dmesg | tail -n 20
+	fi
+}
+echo ">>> fbsd: make -j$jobs $* in $dir (as $(id -un))"
+make -j"$jobs" "$@"
+ko=$(make -V .OBJDIR "$@")/$kmod.ko
+[ -f "$ko" ] || { echo "fbsd: build produced no $ko" >&2; exit 1; }
+if kldstat -q -n "$kmod.ko"; then
+	echo ">>> fbsd: $su kldunload ${force:+$force }$kmod"
+	if ! $su kldunload $force "$kmod"; then
+		echo "fbsd: could not unload $kmod; it is probably in use. What still holds it:"
+		kldstat -v -n "$kmod.ko" | sed -n "1,3p"
+		mount -p | awk -v m="$kmod" "\$3 == m { print \"  mounted: \" \$2 \" (\" \$3 \")\" }"
+		show_dmesg
+		exit 1
+	fi
+fi
+echo ">>> fbsd: $su kldload $ko"
+rc=0
+if $su kldload "$ko"; then
+	kldstat -n "$kmod.ko"
+else
+	rc=1
+	echo "fbsd: kldload failed"
+fi
+show_dmesg
+exit "$rc"'
+
+guest_sh run "$script"
