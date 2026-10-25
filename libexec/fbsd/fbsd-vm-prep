@@ -18,8 +18,10 @@ the first time, none after):
   1. bectl create $BE_NAME (once), a boot environment to roll back to
   2. /usr/local/etc/sudoers.d/zz-fbsd-FBSD_SSH_USER: "NOPASSWD: ALL" for
      FBSD_SSH_USER only, checked with visudo -c before and after install
-  3. vfs.zfs.arc.max=FBSD_GUEST_ARC_MAX in /boot/loader.conf,
-     also applied live with sysctl
+  3. /boot/loader.conf tunables, also applied live with sysctl:
+     vfs.zfs.arc.max=FBSD_GUEST_ARC_MAX, and for panics
+     debug.debugger_on_panic=0 (dump and reboot, no ddb; fbsd ktest --ddb
+     turns ddb on for one boot) and debug.trace_on_panic=1
   4. FBSD_SRC and FBSD_OBJ owned by FBSD_SSH_USER, so builds and git run
      unprivileged
   5. sshd: PasswordAuthentication and KbdInteractiveAuthentication off
@@ -104,19 +106,33 @@ done
 visudo -cq
 say "visudo -c: sudoers OK"
 
-# sysrc rejects dotted names, so edit loader.conf with sed/printf.
+# sysrc rejects dotted names, so loader.conf is edited with grep/sed.
 lc=/boot/loader.conf
-want="vfs.zfs.arc.max=\"$arc\""
-if grep -qx "$want" "$lc"; then
-	say "loader.conf already has $want"
-elif grep -q "^vfs\.zfs\.arc\.max=" "$lc"; then
-	cp -p "$lc" "$lc.fbsd-bak"
-	sed -i "" "s/^vfs\.zfs\.arc\.max=.*/$want/" "$lc"
-	say "loader.conf: replaced the old value with $want (backup: $lc.fbsd-bak)"
-else
-	printf "%s\n" "$want" >>"$lc"
-	say "loader.conf: added $want"
-fi
+backed_up=0
+loader_set() {
+	want="$1=\"$2\""
+	pat=$(printf "%s" "$1" | sed "s/\./\\\\./g")
+	if grep -qx "$want" "$lc"; then
+		say "loader.conf already has $want"
+		return
+	fi
+	if [ "$backed_up" = 0 ]; then cp -p "$lc" "$lc.fbsd-bak"; backed_up=1; fi
+	if grep -q "^$pat=" "$lc"; then
+		sed -i "" "s/^$pat=.*/$want/" "$lc"
+		say "loader.conf: replaced the old value with $want (backup: $lc.fbsd-bak)"
+	else
+		printf "%s\n" "$want" >>"$lc"
+		say "loader.conf: added $want"
+	fi
+}
+loader_set vfs.zfs.arc.max "$arc"
+# Panics: print a backtrace, dump, reboot (no ddb). Tunables rather than
+# sysctl.conf so they also cover panics before rc runs. fbsd ktest --ddb
+# overrides debugger_on_panic for one boot with nextboot -e.
+loader_set debug.debugger_on_panic 0
+loader_set debug.trace_on_panic 1
+sysctl debug.debugger_on_panic=0 debug.trace_on_panic=1 >/dev/null
+say "panic: debugger_on_panic=$(sysctl -n debug.debugger_on_panic) trace_on_panic=$(sysctl -n debug.trace_on_panic)"
 if sysctl vfs.zfs.arc.max="$arc" >/dev/null 2>&1; then
 	say "ARC max is $(sysctl -n vfs.zfs.arc.max) bytes"
 else

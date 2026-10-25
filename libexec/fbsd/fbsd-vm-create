@@ -185,6 +185,8 @@ write_files:
     content: |
       console=\"comconsole\"
       vfs.zfs.arc.max=\"$FBSD_GUEST_ARC_MAX\"
+      debug.debugger_on_panic=\"0\"
+      debug.trace_on_panic=\"1\"
 runcmd:
   - sysrc kld_list+=filemon
   - kldload -n filemon

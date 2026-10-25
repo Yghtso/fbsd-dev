@@ -16,7 +16,7 @@ Read-only checks, each with a fix when it fails:
          free host ports
   guest  (only when the VM is running) sshd reachable, the source tree at
          FBSD_SRC, git, perl, sudo/doas, filemon, WITH_META_MODE, dumpdev,
-         ZFS ARC limit, pool free space
+         swap, panic behaviour, ZFS ARC limit, pool free space
 
 With -n the guest probe is printed (as the exact ssh command) instead of run.
 Exit status: 0 if nothing failed, 1 otherwise. Warnings do not fail.
@@ -122,6 +122,8 @@ have() { command -v "$1" >/dev/null 2>&1 && echo yes || echo no; }
 echo "uname=$(uname -r) $(uname -v | awk "{print \$NF}")"
 echo "bootfile=$(sysctl -n kern.bootfile)"
 echo "physmem=$(sysctl -n hw.physmem)"
+echo "ddb_on_panic=$(sysctl -n debug.debugger_on_panic 2>/dev/null)"
+echo "swap=$(swapinfo -k | awk "NR == 2 {print \$2}")"
 echo "arc_max=$(sysctl -n vfs.zfs.arc.max 2>/dev/null || sysctl -n vfs.zfs.arc_max 2>/dev/null)"
 for c in git perl sudo doas kyua; do echo "cmd_$c=$(have "$c")"; done
 if [ -f "$src/Makefile.inc1" ]; then echo src=yes; else echo src=no; fi
@@ -185,6 +187,13 @@ if [ -n "$arc" ] && [ "$arc" != 0 ]; then
 else
 	meh "ZFS ARC is not capped (can starve builds)" "add vfs.zfs.arc.max to /boot/loader.conf"
 fi
+if [ "$(val ddb_on_panic)" = 0 ]; then
+	ok "panics dump and reboot (debug.debugger_on_panic=0)"
+else
+	meh "panics stop in ddb and wait on the console (debug.debugger_on_panic=$(val ddb_on_panic))" "fbsd vm prep -S"
+fi
+sw=$(val swap)
+if [ -n "$sw" ]; then ok "swap ${sw}K (holds crash dumps)"; else meh "no swap: crash dumps need a dump device" "add a swap partition"; fi
 ok "pool: $(val pool)"
 
 [ "$fails" -eq 0 ]
