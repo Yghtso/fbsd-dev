@@ -73,17 +73,14 @@ kbd=$obj$src/$(uname -m).$(uname -p)/sys/$kernconf
 if [ -d "$kbd" ]; then set -- "KERNBUILDDIR=$kbd"; else set --; echo "fbsd: no $kbd, building with default options" >&2; fi
 kmod=$(make -V KMOD "$@")
 [ -n "$kmod" ] || { echo "fbsd: $dir does not build a kernel module (no KMOD)" >&2; exit 2; }
-mark=$(dmesg | wc -l)
+# Remember the last kernel message, print what came after it (the message
+# buffer is a ring, so line counts are not reliable once it is full).
+last=$(dmesg | tail -n 1)
 show_dmesg() {
-	now=$(dmesg | wc -l)
 	echo ">>> fbsd: kernel messages since the start"
-	if [ "$now" -gt "$mark" ]; then
-		dmesg | tail -n "+$((mark + 1))" | tail -n 40
-	elif [ "$now" -eq "$mark" ]; then
-		echo "(none)"
-	else
-		dmesg | tail -n 20
-	fi
+	new=$(dmesg | awk -v l="$last" "{ a[NR] = \$0; if (\$0 == l) k = NR } END { if (!k) exit 1; for (i = k + 1; i <= NR; i++) print a[i] }") ||
+		new=$(dmesg | tail -n 20)
+	if [ -n "$new" ]; then printf "%s\n" "$new" | tail -n 40; else echo "(none)"; fi
 }
 echo ">>> fbsd: make -j$jobs $* in $dir (as $(id -un))"
 make -j"$jobs" "$@"
