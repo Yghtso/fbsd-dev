@@ -1,0 +1,134 @@
+#!/bin/sh
+# summary: list kernel crash dumps in the guest and open one with kgdb there
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd crash -l
+       fbsd crash [-ns] [-c kgdb-command]... [N]
+
+Work with the dumps savecore(8) left in /var/crash of the guest (dumps go to
+swap on panic and are saved at the next boot). Everything runs in the guest
+as root (the files are 0600), with kgdb from the devel/gdb package.
+
+  -l            list dumps: number, time, panic string, kernel version
+  -s            print the summary from core.txt.N (crashinfo(8): panic,
+                backtrace) instead of opening kgdb
+  -c command    run kgdb non-interactively with these commands (repeatable)
+  N             dump number (default: the latest)
+  -n            dry run: print the commands
+
+The kernel is the one named in core.txt.N ("Reading symbols from ..."),
+falling back to the running kernel; symbols come from
+/usr/lib/debug/boot/<kerneldir>/kernel.debug. A zstd/gzip-compressed dump
+(vmcore.N.zst / .gz, see dumpon_flags=-Z) is decompressed next to it first.
+
+Examples:
+  fbsd crash -l
+  fbsd crash -s
+  fbsd crash -c bt -c 'info threads'
+  fbsd crash 0
+EOF
+}
+
+list=0 summary=0 kcmds=''
+while getopts nhlsc: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
+	h) usage; exit 0 ;;
+	l) list=1 ;;
+	s) summary=1 ;;
+	c) kcmds="$kcmds$OPTARG
+" ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+n=''
+if [ $# -gt 0 ]; then
+	is_uint "$1" || usage_error "dump number must be a number: $1"
+	n=$1
+	shift
+fi
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+fbsd_load_config
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+if [ "$list" = 1 ]; then
+	# shellcheck disable=SC2016 # expanded by the guest shell
+	guest_root_sh run '
+cd /var/crash
+found=0
+for f in $(ls info.[0-9]* 2>/dev/null | sort -t. -k2 -n); do
+	found=1
+	i=${f#info.}
+	t=$(sed -n "s/^ *Dumptime: //p" "$f")
+	p=$(sed -n "s/^ *Panic String: //p" "$f")
+	c=$(sed -n "s/^ *Compression: //p" "$f")
+	v=$(sed -n "s/^ *Version String: //p" "$f")
+	core=$(ls vmcore.$i vmcore.$i.zst vmcore.$i.gz 2>/dev/null | tr "\n" " ")
+	printf "%s  %s  panic: %s\n    %s\n    files: %s(compression: %s)\n" "$i" "$t" "$p" "$v" "${core:-none }" "$c"
+done
+[ "$found" = 1 ] || echo "no crash dumps in /var/crash"'
+	exit 0
+fi
+
+# Resolve the dump number, its kernel and its uncompressed vmcore, then
+# either print core.txt or run kgdb. One guest root script.
+mode='kgdb'
+[ "$summary" = 0 ] || mode='summary'
+[ -z "$kcmds" ] || [ "$mode" = summary ] || mode='batch'
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+script="n=$(shquote "$n") mode=$mode cmds=$(shquote "$kcmds")"'
+set -eu
+cd /var/crash
+if [ -z "$n" ]; then
+	n=$(ls info.[0-9]* 2>/dev/null | sed "s/^info\.//" | sort -n | tail -n 1)
+	[ -n "$n" ] || { echo "no crash dumps in /var/crash" >&2; exit 1; }
+fi
+[ -f "info.$n" ] || { echo "no dump number $n in /var/crash" >&2; exit 1; }
+if [ "$mode" = summary ]; then
+	[ -f "core.txt.$n" ] || { echo "no core.txt.$n (crashinfo did not run)" >&2; exit 1; }
+	# Header, panic and the first backtrace: up to the second ruler line.
+	awk "/^-----/ { if (++r == 2) exit } !/^Reading symbols from / { print }" "core.txt.$n"
+	exit 0
+fi
+kernel=$(sed -n "s|^Reading symbols from \(/boot/[^ ]*/kernel\)\.\.\.$|\1|p" "core.txt.$n" 2>/dev/null | head -n 1)
+[ -n "$kernel" ] || kernel=$(sysctl -n kern.bootfile)
+debug=/usr/lib/debug$kernel.debug
+[ -f "$debug" ] || { echo "missing $debug" >&2; exit 1; }
+if [ ! -f "vmcore.$n" ]; then
+	if [ -f "vmcore.$n.zst" ]; then
+		echo "fbsd: decompressing vmcore.$n.zst" >&2
+		zstd -q -d -o "vmcore.$n" "vmcore.$n.zst"
+	elif [ -f "vmcore.$n.gz" ]; then
+		echo "fbsd: decompressing vmcore.$n.gz" >&2
+		gzip -dkc "vmcore.$n.gz" >"vmcore.$n"
+	else
+		echo "no vmcore.$n in /var/crash (deleted?)" >&2
+		exit 1
+	fi
+fi
+echo "fbsd: kgdb $debug /var/crash/vmcore.$n" >&2
+if [ "$mode" = batch ]; then
+	# kgdb has its own option parser (no -batch/-ex); like crashinfo(8),
+	# feed it the commands on standard input.
+	printf "%s" "$cmds" | kgdb -q "$debug" "vmcore.$n"
+	exit
+fi
+exec kgdb -q "$debug" "vmcore.$n"'
+
+if [ "$mode" = kgdb ]; then
+	guest_root_sh tty "$script"
+else
+	guest_root_sh run "$script"
+fi
