@@ -102,3 +102,37 @@ load helper
 	grep -q 'push$lease -u $fork $branch' "$BATS_TEST_DIRNAME/../libexec/fbsd/fbsd-pr"
 	grep -q "lease=' --force-with-lease'" "$BATS_TEST_DIRNAME/../libexec/fbsd/fbsd-pr"
 }
+
+@test "compdb -n: clangd matching base clang, meta files, clangd --check" {
+	run "$FBSD" -n compdb
+	[ "$status" -eq 0 ]
+	[[ $output == *'clangd=/usr/local/bin/clangd$major'* ]]
+	[[ $output == *'$su pkg install -y "llvm$major"'* ]]
+	[[ $output == *'-path "$top/tmp" -prune'* ]]
+	[[ $output == *'find "$top/obj-lib32" -name "*.meta"'* ]]
+	[[ $output == *'grep -vc "tweak: "'* ]]
+	[[ $output == *'out=$src/compile_commands.json'* ]]
+	[[ $output == *"checks='sys/kern/kern_shutdown.c lib/libc/stdlib/qsort.c'"* ]]
+	[[ $output == *'--check="$src/$f"'* ]]
+	run "$FBSD" -n compdb -c sys/dev/foo.c
+	[[ $output == *"checks=sys/dev/foo.c"* ]]
+	run "$FBSD" -n compdb -c /etc/passwd
+	[ "$status" -eq 2 ]
+}
+
+@test "compdb: the awk generator turns .meta files into valid JSON" {
+	command -v jq >/dev/null || skip "jq not installed"
+	d=$T/obj
+	mkdir -p "$d"
+	printf 'CMD cc -c -O2 -I. /usr/src/sys/kern/a.c\nCMD ctfconvert a.o\nCWD /obj/sys/GENERIC\nTARGET a.o\n' >"$d/a.o.meta"
+	printf 'CMD cc -DX=\\"y\\" -c b.c -o b.o\nCWD /obj/lib\n' >"$d/b.o.meta"
+	printf 'CMD cc -c b.c -o b.pico -fPIC\nCWD /obj/lib\n' >"$d/b.pico.meta"
+	printf 'CMD ln -s x y\nCWD /obj\n' >"$d/c.meta"
+	awkprog=$("$FBSD" -n compdb | sed -n '/^cat >"\$awkf" <<"AWK"$/,/^AWK$/p' | sed '1d;$d')
+	out=$(printf '%s\n' "$d"/*.meta | awk "$awkprog" 2>"$T/n")
+	[ "$(cat "$T/n")" -eq 2 ]
+	[ "$(printf '%s' "$out" | jq length)" -eq 2 ]
+	[ "$(printf '%s' "$out" | jq -r '.[0].file')" = /usr/src/sys/kern/a.c ]
+	[ "$(printf '%s' "$out" | jq -r '.[1].file')" = /obj/lib/b.c ]
+	[ "$(printf '%s' "$out" | jq -r '.[1].command')" = 'cc -DX=\"y\" -c b.c -o b.o' ]
+}

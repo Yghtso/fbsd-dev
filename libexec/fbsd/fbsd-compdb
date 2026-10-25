@@ -1,0 +1,158 @@
+#!/bin/sh
+# summary: write compile_commands.json for clangd in the guest, from build .meta files
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd compdb [-n] [-c file]...
+
+Write FBSD_SRC/compile_commands.json in the guest so clangd (Neovim or any
+LSP editor in the guest) knows the exact flags of every file. No rebuild:
+WITH_META_MODE leaves a .meta file next to each object with the exact
+compiler command (CMD) and directory (CWD); this reads them all under
+FBSD_OBJ (kernel, modules, world; not the bootstrap tools in tmp/). Each
+source file gets the first command found: the kernel first, then world,
+then the 32-bit compat libraries (obj-lib32). Run it again after builds
+that add files.
+
+The file is added to FBSD_SRC/.git/info/exclude so git status stays clean.
+
+clangd: the guest's base clang has no clangd, so the matching LLVM package
+is used (llvm<N> for base clang N, e.g. llvm21 -> clangd21). If it is
+missing it is installed with 'pkg install -y llvm<N>' (network access, about
+1.9 GB installed).
+
+Then the database is validated with 'clangd --check' on one kernel file
+and one libc file (or the files given with -c, relative to FBSD_SRC). The
+check fails if a file has no entry or has compile errors; clangd's own
+failed refactoring "tweaks" are counted separately and do not fail it.
+
+Options:
+  -n         dry run: print the guest script
+  -c file    validate this file instead of the default two (repeatable)
+
+Examples:
+  fbsd build world && fbsd build kernel && fbsd compdb
+  fbsd compdb -c sys/dev/virtio/network/if_vtnet.c
+EOF
+}
+
+checks=''
+while getopts nhc: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
+	h) usage; exit 0 ;;
+	c)
+		case $OPTARG in /* | *..* | -* | *[!A-Za-z0-9_./+-]*) usage_error "-c takes a path relative to FBSD_SRC: $OPTARG" ;; esac
+		checks="${checks:+$checks }$OPTARG"
+		;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+: "${checks:=sys/kern/kern_shutdown.c lib/libc/stdlib/qsort.c}"
+
+fbsd_load_config
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+script="src=$(shquote "$FBSD_SRC") obj=$(shquote "$FBSD_OBJ") kernconf=$(shquote "$FBSD_KERNCONF") su=$FBSD_GUEST_SU checks=$(shquote "$checks")"'
+set -eu
+major=$(cc --version | sed -n "s/.*clang version \([0-9]*\)\..*/\1/p" | head -n 1)
+[ -n "$major" ] || { echo "fbsd: cannot tell the base clang version" >&2; exit 1; }
+clangd=/usr/local/bin/clangd$major
+if [ ! -x "$clangd" ]; then
+	echo ">>> fbsd: no $clangd; installing package llvm$major (matches base clang $major)"
+	$su pkg install -y "llvm$major"
+fi
+echo ">>> fbsd: using $clangd ($($clangd --version | head -n 1))"
+
+top=$obj$src/$(uname -m).$(uname -p)
+[ -d "$top" ] || { echo "fbsd: no build in $top; run fbsd build world / kernel first" >&2; exit 1; }
+out=$src/compile_commands.json
+tmp=$(mktemp)
+echo ">>> fbsd: reading .meta files under $top"
+# One awk run over the list of .meta files (xargs could split it into several
+# runs, which would break the JSON and the de-duplication).
+awkf=$(mktemp)
+cat >"$awkf" <<"AWK"
+function emit(cmd, cwd,    n, w, i, f, c) {
+	n = split(cmd, w, " ")
+	f = ""
+	for (i = 1; i <= n; i++)
+		if (w[i] !~ /^-/ && w[i] ~ /\.(c|cc|cpp|cxx|S|s|m)$/) { f = w[i]; break }
+	if (f == "") return
+	if (f !~ /^\//) f = cwd "/" f
+	if (f in seen) return
+	seen[f] = 1
+	c = cmd
+	gsub(/\\/, "\\\\", c)
+	gsub(/"/, "\\\"", c)
+	printf "%s{\"directory\": \"%s\", \"file\": \"%s\", \"command\": \"%s\"}", (count++ ? ",\n" : "[\n"), cwd, f, c
+}
+{
+	meta = $0
+	cmd = ""
+	cwd = ""
+	while ((getline line < meta) > 0) {
+		if (cmd == "" && line ~ /^CMD .* -c /) cmd = substr(line, 5)
+		else if (line ~ /^CWD /) { cwd = substr(line, 5); break }
+	}
+	close(meta)
+	if (cmd != "" && cwd != "") emit(cmd, cwd)
+}
+END {
+	print (count ? "\n]" : "[]")
+	print count + 0 > "/dev/stderr"
+}
+AWK
+{
+	find "$top/sys/$kernconf" -name "*.meta" 2>/dev/null
+	find "$top" -path "$top/tmp" -prune -o -path "$top/sys/$kernconf" -prune \
+	    -o -path "$top/obj-lib32" -prune -o -name "*.meta" -print
+	find "$top/obj-lib32" -name "*.meta" 2>/dev/null
+} | awk -f "$awkf" >"$tmp" 2>"$tmp.n"
+rm -f "$awkf"
+mv "$tmp" "$out"
+chmod 644 "$out"
+echo ">>> fbsd: wrote $out ($(cat "$tmp.n") files, $(($(wc -c <"$out") / 1048576)) MB)"
+rm -f "$tmp.n"
+ex=$(git -C "$src" rev-parse --git-path info/exclude)
+case $ex in /*) ;; *) ex=$src/$ex ;; esac
+grep -qx "/compile_commands.json" "$ex" 2>/dev/null || echo "/compile_commands.json" >>"$ex"
+
+rc=0
+for f in $checks; do
+	echo ">>> fbsd: $(basename "$clangd") --check=$f"
+	log=$(mktemp)
+	(cd "$src" && "$clangd" --compile-commands-dir="$src" --check="$src/$f") >"$log" 2>&1 || :
+	if grep -q "Compile command from CDB" "$log"; then
+		sed -n "s/.*Compile command from CDB is: \[\([^]]*\)\].*/    entry found, directory \1/p" "$log" | head -n 1
+	else
+		echo "    no entry for $f in the database (not built yet?)"
+		rc=1
+	fi
+	tweaks=$(grep -c "tweak: .*FAIL" "$log" || :)
+	errs=$(grep "^E\[" "$log" | grep -vc "tweak: " || :)
+	grep "^E\[" "$log" | grep -v "tweak: " | sed "s/^/    /" | head -n 10
+	if grep -q "All checks completed" "$log"; then
+		echo "    $errs errors ($tweaks failed clangd tweaks ignored)"
+	else
+		echo "    clangd did not finish; last lines:"
+		tail -n 5 "$log" | sed "s/^/    /"
+		rc=1
+	fi
+	[ "$errs" -eq 0 ] || rc=1
+	rm -f "$log"
+done
+exit "$rc"'
+
+guest_sh run "$script"
