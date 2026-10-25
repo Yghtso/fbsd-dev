@@ -5,16 +5,16 @@ load helper
 # The guest scripts are checked as text: a dry run never contacts the guest.
 
 @test "build world/kernel/subdir -n: unprivileged make in the guest" {
-	run "$FBSD" -n build world
+	run "$FBSD" -nn build world
 	[ "$status" -eq 0 ]
 	[[ $output == *"set -- -j8 buildworld"* ]]
 	[[ $output == *'exec make "$@"'* ]]
 	[[ $output != *"sudo"* ]]
 	[[ $output == *"follow: copy /var/tmp/fbsd-job/log to $XDG_DATA_HOME/fbsd/log/build/"*"-world.log"* ]]
 	[[ $output == *'daemon -f -p "$d/pid" -o "$d/log"'* ]]
-	run "$FBSD" -n build -k MYKERNEL -j 3 kernel -- -DNO_KERNELCLEAN
+	run "$FBSD" -nn build -k MYKERNEL -j 3 kernel -- -DNO_KERNELCLEAN
 	[[ $output == *"set -- -j3 buildkernel KERNCONF=MYKERNEL -DNO_KERNELCLEAN"* ]]
-	FBSD_MAKE_ARGS='-DWITHOUT_TESTS -s' run "$FBSD" -n build sys/modules/if_vtnet
+	FBSD_MAKE_ARGS='-DWITHOUT_TESTS -s' run "$FBSD" -nn build sys/modules/if_vtnet
 	[[ $output == *"dir=sys/modules/if_vtnet"* ]]
 	[[ $output == *"set -- -j8 -DWITHOUT_TESTS -s"* ]]
 }
@@ -41,19 +41,21 @@ load helper
 }
 
 @test "install world -n wraps beinstall.sh with NO_PKG_UPGRADE and a one-shot BE" {
-	run "$FBSD" -n install world -r
+	run "$FBSD" -nn install world -r
 	[ "$status" -eq 0 ]
-	[[ $output == *"sudo /bin/sh -c"* ]]
+	[[ $output == *"sudo /bin/sh -s <<"* ]]
 	[[ $output == *"env NO_PKG_UPGRADE=1 sh tools/build/beinstall.sh"* ]]
+	[[ $output == *'FreeBSD-base: { enabled: no }'* ]]
+	[[ $output == *'/etc/fbsd-world'* ]]
 	[[ $output == *'bectl activate "$default"'* ]]
 	[[ $output == *'bectl activate -t "$new"'* ]]
 	[[ $output == *"sudo shutdown -r now"* ]]
-	run "$FBSD" -n install kernel
+	run "$FBSD" -nn install kernel
 	[ "$status" -eq 2 ]
 }
 
 @test "ktest -n: KODIR, nextboot -k, reboot, report" {
-	run "$FBSD" -n ktest
+	run "$FBSD" -nn ktest
 	[ "$status" -eq 0 ]
 	[[ $output == *'installkernel KERNCONF="$kernconf" INSTKERNNAME="$name"'* ]]
 	[[ $output == *"name=kernel.test"* ]]
@@ -64,7 +66,7 @@ load helper
 }
 
 @test "ktest --ddb sets debugger_on_panic for one boot; -I skips the install" {
-	run "$FBSD" -n ktest --ddb -I
+	run "$FBSD" -nn ktest --ddb -I
 	[ "$status" -eq 0 ]
 	[[ $output == *"'sudo nextboot -k kernel.test -e debug.debugger_on_panic=1'"* ]]
 	[[ $output != *installkernel* ]]
@@ -77,7 +79,7 @@ load helper
 }
 
 @test "ktest -x runs a command after boot" {
-	run "$FBSD" -n ktest -I -x 'sudo sysctl debug.kdb.panic=1'
+	run "$FBSD" -nn ktest -I -x 'sudo sysctl debug.kdb.panic=1'
 	[[ $output == *"'sudo sysctl debug.kdb.panic=1'"* ]]
 	[[ $output == *"if the guest went down"* ]]
 }
@@ -106,7 +108,7 @@ load helper
 }
 
 @test "vm reboot -n" {
-	run "$FBSD" -n vm reboot
+	run "$FBSD" -nn vm reboot
 	[ "$status" -eq 0 ]
 	[[ $output == *"'sudo shutdown -r now'"* ]]
 	[[ $output == *"wait up to 180 s for sshd to go away"* ]]
@@ -137,4 +139,28 @@ load helper
 	[[ $output == *"Dump complete"* ]]
 	[[ $output != *"panic: old"* ]]
 	[[ $output != *BdsDxe* ]]
+}
+
+@test "-n shows guest scripts as plain text, -nn and -n -v the ssh lines" {
+	run "$FBSD" -n ktest -I
+	[[ $output == *'guest (as yghtso)$ sudo nextboot -k kernel.test'* || $output == *'guest (as '*')$ sudo nextboot -k kernel.test'* ]]
+	[[ $output != *"ssh -p"* ]]
+	run "$FBSD" -n install world
+	[[ $output == *"# ---- guest script, as "*"detached with daemon(8)"* ]]
+	[[ $output == *$'\nsudo /bin/sh -s <<\'FBSD_ROOT\'\n'* ]]
+	[[ $output == *$'\nFBSD_ROOT\n# ---- end of guest script ----'* ]]
+	run "$FBSD" -nn ktest -I
+	[[ $output == *"ssh -p 2222 "* ]]
+	run "$FBSD" -n -v ktest -I
+	[[ $output == *"ssh -p 2222 "* ]]
+	run "$FBSD" ktest -n -I
+	[[ $output != *"ssh -p"* ]]
+}
+
+@test "vm prep -n shows the root script readably" {
+	run "$FBSD" -n vm prep -S
+	[ "$status" -eq 0 ]
+	[[ $output == *"# ---- guest script, as root (sudo) (FreeBSD sh) ----"* ]]
+	[[ $output == *"ntpd_enable=YES ntpd_sync_on_start=YES dumpon_flags=-Z"* ]]
+	[[ $output == *'loader_set debug.debugger_on_panic 0'* ]]
 }

@@ -13,6 +13,11 @@
 guest_ssh() {
 	_mode=$1
 	shift
+	if is_dryrun && ! dry_full && [ "$_mode" != probe ]; then
+		show_guest "as $FBSD_SSH_USER" "$*"
+		[ "$_mode" != exec ] || exit 0
+		return 0
+	fi
 	set -- -p "$FBSD_SSH_PORT" -i "$FBSD_SSH_KEY" -o IdentitiesOnly=yes \
 		-o ControlMaster=auto -o "ControlPath=$FBSD_VMRUN/ssh-%C" \
 		-o ControlPersist=10m -o "HostKeyAlias=$FBSD_VM_NAME" \
@@ -35,7 +40,31 @@ guest_ssh() {
 # guest_sh mode 'script': run a FreeBSD /bin/sh script in the guest, whatever
 # the user's login shell is.
 guest_sh() {
+	if is_dryrun && ! dry_full; then
+		show_guest "as $FBSD_SSH_USER" "$2"
+		return 0
+	fi
 	guest_ssh "$1" "/bin/sh -c $(shquote "$2")"
+}
+
+# guest_root_sh mode 'script': the same, as root through FBSD_GUEST_SU.
+guest_root_sh() {
+	if is_dryrun && ! dry_full; then
+		show_guest "as root ($FBSD_GUEST_SU)" "$2"
+		return 0
+	fi
+	guest_ssh "$1" "$FBSD_GUEST_SU /bin/sh -c $(shquote "$2")"
+}
+
+# show_guest who text: readable dry-run form of a guest command or script.
+show_guest() {
+	case $2 in
+	*'
+'*)
+		printf '# ---- guest script, %s (FreeBSD sh) ----\n%s\n# ---- end of guest script ----\n' "$1" "$2"
+		;;
+	*) printf 'guest (%s)$ %s\n' "$1" "$2" ;;
+	esac
 }
 
 guest_reachable() { guest_ssh probe true >/dev/null 2>&1; }

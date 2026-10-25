@@ -16,7 +16,10 @@ usage: fbsd [-nv] [-C config] <command> [args]
 Personal toolkit for FreeBSD-CURRENT development in a QEMU/KVM guest.
 
 Global options (every command also accepts -n and -h itself):
-  -n         dry run: print the exact commands, change nothing
+  -n         dry run: print the commands, change nothing; guest scripts are
+             shown as plain text (what runs inside the guest)
+  -nn        dry run with the exact host command lines (ssh wrapping too);
+             -n -v is the same
   -v         verbose: print each command before running it
   -C config  use this config file instead of
              \${XDG_CONFIG_HOME:-~/.config}/fbsd/fbsd.conf
@@ -41,7 +44,7 @@ EOF
 
 while getopts ':nvC:h' opt; do
 	case $opt in
-	n) FBSD_DRYRUN=1 ;;
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
 	v) FBSD_VERBOSE=1 ;;
 	C) FBSD_CONFIG=$OPTARG && export FBSD_CONFIG ;;
 	h) usage && exit 0 ;;

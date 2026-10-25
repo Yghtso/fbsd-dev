@@ -3,7 +3,7 @@ load helper
 
 # shellcheck disable=SC2016 # literal $user from the guest script
 @test "vm prep -n shows the root script and the clone" {
-	run "$FBSD" -n vm prep
+	run "$FBSD" -nn vm prep
 	[ "$status" -eq 0 ]
 	[[ $output == "ssh -t -p 2222 "* ]]
 	[[ $output == *"sudo /bin/sh -c"* ]]
@@ -21,7 +21,7 @@ load helper
 }
 
 @test "vm prep -S skips the clone, doas is honoured" {
-	FBSD_GUEST_SU=doas run "$FBSD" -n vm prep -S
+	FBSD_GUEST_SU=doas run "$FBSD" -nn vm prep -S
 	[[ $output == *"doas /bin/sh -c"* ]]
 	[[ $output != *"git clone"* ]]
 }

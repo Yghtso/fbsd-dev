@@ -29,7 +29,10 @@ usage_error() {
 	exit 2
 }
 
-is_dryrun() { [ "$FBSD_DRYRUN" = 1 ]; }
+# Dry run levels: -n (1) shows guest scripts as plain readable text, -nn (2)
+# or -n -v shows the exact host command lines, ssh wrapping included.
+is_dryrun() { [ "$FBSD_DRYRUN" != 0 ]; }
+dry_full() { [ "$FBSD_DRYRUN" -ge 2 ] || [ "$FBSD_VERBOSE" = 1 ]; }
 
 # shquote arg...: print the arguments as one line that a POSIX shell parses
 # back into the same words.

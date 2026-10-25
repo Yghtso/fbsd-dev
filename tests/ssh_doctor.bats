@@ -2,7 +2,7 @@
 load helper
 
 @test "ssh -n shows the full ssh command with ControlMaster" {
-	run "$FBSD" -n ssh uname -a
+	run "$FBSD" -nn ssh uname -a
 	[ "$status" -eq 0 ]
 	[[ $output == *"ssh -p 2222 -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPath=$XDG_RUNTIME_DIR/fbsd/fbsd-dev/ssh-%C"* ]]
 	[[ $output == *"-o HostKeyAlias=fbsd-dev -o UserKnownHostsFile=$XDG_DATA_HOME/fbsd/known_hosts"* ]]

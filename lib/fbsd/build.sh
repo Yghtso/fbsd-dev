@@ -28,7 +28,11 @@ mkdir -p "$d"
 printf "%s\n" "$script" >"$d/script.sh"
 printf "%s\n" "$hostlog" >"$d/hostlog"
 daemon -f -p "$d/pid" -o "$d/log" /bin/sh -c "/bin/sh $d/script.sh; echo \$? >$d/rc.tmp; mv $d/rc.tmp $d/rc"'
-	if is_dryrun; then
+	if is_dryrun && ! dry_full; then
+		show_guest "as $FBSD_SSH_USER, detached with daemon(8) in $FBSD_GUEST_JOBDIR" "$_script"
+		note "output copied to $_log every 3 s until the job ends (-nn shows the launcher)"
+		return 0
+	elif is_dryrun; then
 		guest_sh run "$_start"
 		note "follow: copy $FBSD_GUEST_JOBDIR/log to $_log every 3 s until $FBSD_GUEST_JOBDIR/rc exists"
 		return 0
