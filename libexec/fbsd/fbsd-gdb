@@ -1,0 +1,135 @@
+#!/bin/sh
+# summary: debug the running guest kernel from the host (gdb on the QEMU gdbstub)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd gdb [-nS] [-k kerneldir] [-x gdb-command]...
+
+Attach the host's gdb to the QEMU gdbstub (127.0.0.1:FBSD_GDB_PORT) with the
+symbols of the kernel the guest is running. Attaching STOPS the whole guest
+(all vCPUs) until you 'continue' or 'detach'; quitting gdb detaches. Works
+also when the guest sits in ddb after a panic (fbsd ktest --ddb).
+
+Symbols: /usr/lib/debug/boot/<kerneldir>/kernel.debug plus kernel-gdb.py and
+gdb/*.py (FreeBSD's gdb helpers) are copied once from the guest into
+FBSD_WORKDIR/debug/<kerneldir>-<sha256>/ (tar over ssh). <kerneldir> comes
+from kern.bootfile (e.g. kernel, kernel.test) unless -k is given.
+
+Options:
+  -n            dry run: print the commands
+  -k dir        kernel directory under /boot to take symbols for
+  -S            also copy the matching sys/ sources out of the guest's git
+                (git archive <commit from uname -v> sys) into
+                FBSD_WORKDIR/src/<commit>/ and map /usr/src there, so 'list'
+                shows source lines (about 600 MB, once per commit)
+  -x command    run gdb non-interactively: attach, run each -x command,
+                detach (the guest continues). Repeatable.
+
+Limits: host gdb sees vCPUs as threads, not kernel threads, so helpers that
+walk kernel threads (acttrace, $PCPU) do not work here; module (.ko)
+symbols are not loaded automatically (that needs kgdb, see fbsd crash).
+
+Examples:
+  fbsd gdb
+  fbsd gdb -x bt -x 'p version'
+  fbsd gdb -S -x 'list kern_reboot'
+EOF
+}
+
+kdir='' srcs=0 xcmds=''
+while getopts nhSk:x: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=$((FBSD_DRYRUN + 1)) ;;
+	h) usage && exit 0 ;;
+	S) srcs=1 ;;
+	k) kdir=$OPTARG ;;
+	x) xcmds="$xcmds$OPTARG
+" ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+case $kdir in *[!A-Za-z0-9_.-]*) usage_error "invalid kernel directory: $kdir" ;; esac
+
+fbsd_load_config
+need_cmd gdb gdb
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest (needed once to fetch symbols)" "fbsd doctor"
+fi
+
+# Which kernel, which debug file, which commit.
+if [ -z "$kdir" ]; then
+	if is_dryrun; then
+		kdir='<kernel dir from kern.bootfile>'
+	else
+		bf=$(guest_ssh probe 'sysctl -n kern.bootfile')
+		kdir=$(basename -- "$(dirname -- "$bf")")
+	fi
+fi
+dbgdir=/usr/lib/debug/boot/$kdir
+if is_dryrun; then
+	sum='<sha256>'
+else
+	sum=$(guest_ssh probe "sha256 -q $dbgdir/kernel.debug") ||
+		die "no $dbgdir/kernel.debug in the guest" "build and install the kernel with debug info (the default)"
+fi
+cache=$FBSD_WORKDIR/debug/$kdir-$(printf '%.16s' "$sum")
+
+if [ -f "$cache/kernel.debug" ]; then
+	is_dryrun || info "symbols: $cache (cached)"
+else
+	run mkdir -p "$cache"
+	show_cmd "$(shquote ssh guest "tar -C $dbgdir -cf - kernel.debug kernel-gdb.py gdb") | $(shquote tar -xf - -C "$cache")"
+	if ! is_dryrun; then
+		info "copying $dbgdir/kernel.debug and gdb helpers from the guest"
+		guest_ssh probe "tar -C $dbgdir -cf - kernel.debug \$(cd $dbgdir && ls -d kernel-gdb.py gdb 2>/dev/null)" |
+			tar -xf - -C "$cache"
+		[ -f "$cache/kernel.debug" ] || die "copy failed" "check: fbsd ssh ls $dbgdir"
+	fi
+fi
+
+set -- -q -ex "set debuginfod enabled off"
+if [ "$srcs" = 1 ]; then
+	if is_dryrun; then
+		rev='<commit from uname -v>'
+	else
+		rev=$(guest_ssh probe 'uname -v' | sed -n 's/.*-n[0-9]*-\([0-9a-f]\{7,\}\).*/\1/p')
+		[ -n "$rev" ] || die "cannot read the kernel's commit from uname -v" "build the kernel from a git checkout"
+	fi
+	srcdir=$FBSD_WORKDIR/src/$rev
+	if [ ! -d "$srcdir/sys" ]; then
+		run mkdir -p "$srcdir"
+		show_cmd "$(shquote ssh guest "git -C $FBSD_SRC archive $rev sys") | $(shquote tar -xf - -C "$srcdir")"
+		if ! is_dryrun; then
+			info "copying sys/ at $rev from the guest's git"
+			guest_ssh probe "git -C $FBSD_SRC archive $rev sys" | tar -xf - -C "$srcdir"
+		fi
+	fi
+	set -- "$@" -ex "set substitute-path /usr/src $srcdir"
+fi
+if [ -f "$cache/kernel-gdb.py" ] || is_dryrun; then
+	set -- "$@" -ex "source $cache/kernel-gdb.py"
+fi
+set -- "$@" -ex "target remote 127.0.0.1:$FBSD_GDB_PORT"
+
+if [ -n "$xcmds" ]; then
+	set -- -batch "$@"
+	while IFS= read -r c; do
+		[ -n "$c" ] && set -- "$@" -ex "$c"
+	done <<EOF
+$xcmds
+EOF
+	set -- "$@" -ex detach
+	is_dryrun || info "attaching (the guest is stopped until gdb detaches)"
+	run gdb "$@" "$cache/kernel.debug"
+else
+	is_dryrun || info "attaching; the guest is stopped until you 'continue' or quit"
+	run_exec gdb "$@" "$cache/kernel.debug"
+fi
