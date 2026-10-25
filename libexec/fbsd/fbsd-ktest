@@ -1,0 +1,189 @@
+#!/bin/sh
+# summary: install a test kernel to /boot/kernel.test and boot it once (nextboot)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+. "$FBSD_ROOT/lib/fbsd/build.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd ktest [-nI] [-d|--ddb] [-k kernconf] [-x command]
+
+Boot a freshly built kernel once, without ever touching /boot/kernel:
+  1. make installkernel KERNCONF=<kernconf> KODIR=/boot/FBSD_TESTKERNEL
+     (as root through FBSD_GUEST_SU; the build itself is 'fbsd build kernel')
+  2. nextboot -k FBSD_TESTKERNEL   (one boot only; nextboot(8))
+  3. shutdown -r now, wait for sshd, then report uname -v and whether the
+     test kernel (kern.bootfile) or the fallback /boot/kernel booted
+  4. scan the serial console log of this boot for a panic, and /var/crash
+     for a new vmcore written by savecore(8)
+
+Panics: by default the guest prints a backtrace, dumps to swap and reboots
+(debug.debugger_on_panic=0 in loader.conf, set by fbsd vm prep), so a
+panicking test kernel comes back on /boot/kernel. With --ddb this one boot
+gets 'nextboot -e debug.debugger_on_panic=1': a panic stops in ddb, ktest
+reports it and you attach with 'fbsd vm console' (or gdb later).
+
+Options:
+  -n            dry run: print the commands
+  -d, --ddb     stop in ddb on a panic during this test boot
+  -k kernconf   kernel config (default FBSD_KERNCONF)
+  -I            skip installkernel, boot the kernel already in KODIR
+  -x command    after the test kernel is up, run this guest command; if the
+                guest goes down (panic), wait for it and report again
+
+Exit status: 0 test kernel booted (and -x command succeeded), 1 fallback
+kernel booted or a panic happened, 2 stopped in ddb.
+
+Examples:
+  fbsd build kernel && fbsd ktest
+  fbsd ktest --ddb
+  fbsd ktest -I -x 'kldload mymod'
+  fbsd ktest -I -x 'sudo sysctl debug.kdb.panic=1'   (test the safety net)
+EOF
+}
+
+for a do
+	shift
+	case $a in
+	--ddb) set -- "$@" -d ;;
+	--help) set -- "$@" -h ;;
+	*) set -- "$@" "$a" ;;
+	esac
+done
+ddb=0 install=1 kernconf='' xcmd=''
+while getopts nhdIk:x: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	d) ddb=1 ;;
+	I) install=0 ;;
+	k) kernconf=$OPTARG ;;
+	x) xcmd=$OPTARG ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+fbsd_load_config
+: "${kernconf:=$FBSD_KERNCONF}"
+case $kernconf in '' | *[!A-Za-z0-9_.-]*) usage_error "invalid kernel config name: $kernconf" ;; esac
+case $FBSD_TESTKERNEL in
+'' | kernel | *[!A-Za-z0-9_.-]*) die "FBSD_TESTKERNEL must be a plain name other than 'kernel', got '$FBSD_TESTKERNEL'" ;;
+esac
+su=$FBSD_GUEST_SU
+kodir=/boot/$FBSD_TESTKERNEL
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+# crash_bounds: savecore's next dump number (/var/crash/bounds), 0 if none.
+crash_bounds() {
+	b=$(guest_ssh probe 'cat /var/crash/bounds 2>/dev/null' 2>/dev/null) || b=''
+	is_uint "$b" || b=0
+	echo "$b"
+}
+
+# report off bounds: what booted, any panic on the console since byte
+# offset off, any vmcore numbered >= bounds. Returns 0 if the test kernel
+# runs and nothing panicked.
+report() {
+	bootfile=$(guest_ssh probe 'sysctl -n kern.bootfile' 2>/dev/null) || bootfile='?'
+	uname_v=$(guest_ssh probe 'uname -v' 2>/dev/null) || uname_v='?'
+	status=0
+	info "uname -v: $uname_v"
+	if [ "$bootfile" = "$kodir/kernel" ]; then
+		info "booted the TEST kernel ($bootfile)"
+	else
+		warn "booted the FALLBACK kernel ($bootfile), not $kodir/kernel"
+		status=1
+	fi
+	if panic_report "$1" >/dev/null; then
+		warn "the console shows a panic:"
+		panic_report "$1" | sed 's/^/    /' >&2
+		status=1
+	fi
+	now=$(crash_bounds)
+	if [ "$now" -gt "$2" ]; then
+		n=$((now - 1))
+		ps=$(guest_ssh probe "sed -n 's/^ *Panic String: //p' /var/crash/info.$n" 2>/dev/null) || ps=''
+		warn "savecore wrote /var/crash/vmcore.$n (panic string: ${ps:-?})"
+		status=1
+	fi
+	return "$status"
+}
+
+log=$FBSD_LOGDIR/build/$(date +%Y%m%d-%H%M%S)-ktest-install.log
+if [ "$install" = 1 ]; then
+	# shellcheck disable=SC2016 # expanded by the guest shell
+	script="src=$(shquote "$FBSD_SRC") kernconf=$(shquote "$kernconf") kodir=$(shquote "$kodir") su=$(shquote "$su")"'
+set -eu
+echo ">>> fbsd: $su make -C $src installkernel KERNCONF=$kernconf KODIR=$kodir"
+$su make -C "$src" installkernel KERNCONF="$kernconf" KODIR="$kodir"'
+	is_dryrun || info "installing $kernconf into $kodir"
+	guest_logged "$log" '^>>> ' "$script"
+fi
+
+if [ "$ddb" = 1 ]; then
+	guest_ssh run "$su nextboot -k $FBSD_TESTKERNEL -e debug.debugger_on_panic=1"
+else
+	guest_ssh run "$su nextboot -k $FBSD_TESTKERNEL"
+fi
+
+off=$(console_size)
+bounds=0
+is_dryrun || bounds=$(crash_bounds)
+is_dryrun || info "rebooting into $kodir (one boot only)$([ "$ddb" = 0 ] || echo ', ddb on panic')"
+guest_ssh run "$su shutdown -r now" || :
+wait_ssh_down 180 || die "the guest did not go down within 180 s" "fbsd vm console"
+
+# Wait for sshd; with --ddb a panic stops in ddb, so watch the console too.
+note "wait up to $FBSD_BOOT_TIMEOUT s for sshd; with --ddb stop early if the console shows 'db>'"
+if ! is_dryrun; then
+	t=0
+	until guest_reachable; do
+		if [ "$ddb" = 1 ] && console_since "$off" | grep -q '^db> '; then
+			warn "the test kernel panicked and is waiting in ddb:"
+			panic_report "$off" | sed 's/^/    /' >&2 || :
+			info "attach with: fbsd vm console   (ddb: 'bt', 'dump', 'reset')"
+			exit 2
+		fi
+		t=$((t + 3))
+		[ "$t" -lt "$FBSD_BOOT_TIMEOUT" ] ||
+			die "sshd did not come back within $FBSD_BOOT_TIMEOUT s" "fbsd vm log -t 60"
+		sleep 3
+	done
+fi
+rc=0
+if is_dryrun; then
+	note "report: uname -v, sysctl kern.bootfile (test kernel if $kodir/kernel), panic lines in the console log, new /var/crash/vmcore.N"
+else
+	report "$off" "$bounds" || rc=$?
+fi
+
+if [ -n "$xcmd" ] && [ "$rc" -eq 0 ]; then
+	off=$(console_size)
+	is_dryrun || bounds=$(crash_bounds)
+	is_dryrun || info "running on the test kernel: $xcmd"
+	xrc=0
+	guest_ssh run "$xcmd" || xrc=$?
+	note "if the guest went down: wait for sshd and report again"
+	if ! is_dryrun; then
+		sleep 5
+		if ! guest_reachable; then
+			warn "the guest went down after the command; waiting for it to come back"
+			wait_ssh "$FBSD_BOOT_TIMEOUT" ||
+				die "sshd did not come back within $FBSD_BOOT_TIMEOUT s" "fbsd vm log -t 60"
+			report "$off" "$bounds" || rc=$?
+			[ "$rc" -ne 0 ] || rc=1
+		elif [ "$xrc" -ne 0 ]; then
+			warn "the command failed (exit $xrc)"
+			rc=1
+		fi
+	fi
+fi
+exit "$rc"
