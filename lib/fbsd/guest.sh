@@ -7,6 +7,7 @@
 
 # guest_ssh mode [remote args...]
 #   mode run   : run through `run` (shown with -n/-v, skipped with -n)
+#   mode tty   : like run, with a terminal (for sudo password prompts)
 #   mode exec  : like run, but exec ssh (interactive use)
 #   mode probe : quiet, non-interactive, short timeout; always executes
 guest_ssh() {
@@ -20,6 +21,7 @@ guest_ssh() {
 		"$FBSD_SSH_USER@127.0.0.1" "$@"
 	case $_mode in
 	run) run ssh "$@" ;;
+	tty) run ssh -t "$@" ;;
 	exec) run_exec ssh "$@" ;;
 	probe)
 		# ssh uses the first value given for an option, so these win.

@@ -74,8 +74,9 @@ vm_up() {
 			"check that the kvm module is loaded and you are in group kvm"
 	for port in "$FBSD_SSH_PORT" "$FBSD_GDB_PORT"; do
 		if port_in_use "$port"; then
-			die "port $port is already in use on the host" \
-				"stop whatever listens there (ss -ltnp) or change FBSD_SSH_PORT/FBSD_GDB_PORT"
+			msg="port $port is already in use on the host"
+			hint="stop whatever listens there (ss -ltnp) or change FBSD_SSH_PORT/FBSD_GDB_PORT"
+			if is_dryrun; then warn "$msg; a real run would stop here"; else die "$msg" "$hint"; fi
 		fi
 	done
 	if [ "$FBSD_FIRMWARE" = uefi ]; then

@@ -1,0 +1,170 @@
+#!/bin/sh
+# summary: prepare the guest for development (sudo, ARC cap, sshd, /usr/src)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+BE_NAME=fbsd-pre-prep
+
+usage() {
+	cat <<EOF
+usage: fbsd vm prep [-n] [-S] [-h]
+
+Prepare a running guest for development. Idempotent: every step checks
+first and only changes what is missing. Steps, as root (one sudo prompt
+the first time, none after):
+  1. bectl create $BE_NAME (once), a boot environment to roll back to
+  2. /usr/local/etc/sudoers.d/zz-fbsd-FBSD_SSH_USER: "NOPASSWD: ALL" for
+     FBSD_SSH_USER only, checked with visudo -c before and after install
+  3. vfs.zfs.arc.max=FBSD_GUEST_ARC_MAX in /boot/loader.conf,
+     also applied live with sysctl
+  4. FBSD_SRC and FBSD_OBJ owned by FBSD_SSH_USER, so builds and git run
+     unprivileged
+  5. sshd: PasswordAuthentication and KbdInteractiveAuthentication off
+     (only if sshd -T says they are on; sshd_config is backed up, the new
+     config is checked with sshd -t, then sshd is reloaded)
+Then as FBSD_SSH_USER:
+  6. full git clone of FBSD_SRC_URL into FBSD_SRC as origin (skipped if
+     FBSD_SRC is already a git checkout). Network access: the guest fetches
+     the FreeBSD repository, several GB.
+
+Options:
+  -n  dry run: print the exact ssh commands and guest scripts
+  -S  skip the source clone (step 6)
+
+Examples:
+  fbsd -n vm prep
+  fbsd vm prep
+EOF
+}
+
+skip_clone=0
+while getopts nhS opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	S) skip_clone=1 ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+fbsd_load_config
+case $FBSD_SSH_USER in
+'' | *[!a-z0-9_-]*) die "FBSD_SSH_USER '$FBSD_SSH_USER' is not a plain user name" ;;
+esac
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+# Values are passed as quoted assignments; the rest is literal FreeBSD sh.
+vars="user=$(shquote "$FBSD_SSH_USER") be=$(shquote "$BE_NAME")
+arc=$(shquote "$FBSD_GUEST_ARC_MAX") src=$(shquote "$FBSD_SRC") obj=$(shquote "$FBSD_OBJ")"
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+root_script=$vars'
+set -eu
+say() { echo "guest: $*"; }
+
+if bectl list -H | awk "{print \$1}" | grep -qx "$be"; then
+	say "boot environment $be exists, kept"
+else
+	bectl create "$be"
+	say "created boot environment $be"
+fi
+
+# sudo reads sudoers.d in lexical order and the last matching rule wins, so
+# this file must sort after others (such as "wheel", which asks for a password).
+f=/usr/local/etc/sudoers.d/zz-fbsd-$user
+rm -f "/usr/local/etc/sudoers.d/fbsd-$user"  # name used by an earlier version
+tmp=$(mktemp -t fbsd-sudoers)
+printf "%s\n" "# managed by fbsd vm prep" "$user ALL=(ALL:ALL) NOPASSWD: ALL" >"$tmp"
+if cmp -s "$tmp" "$f"; then
+	rm -f "$tmp"
+	say "sudoers drop-in $f up to date"
+else
+	visudo -cqf "$tmp"
+	install -m 0440 -o root -g wheel "$tmp" "$f"
+	rm -f "$tmp"
+	say "installed $f"
+fi
+# visudo -c fails on any drop-in that is not mode 0440, even one sudo itself
+# would accept; fix the mode (content untouched) so the check is meaningful.
+for g in /usr/local/etc/sudoers.d/*; do
+	[ -f "$g" ] || continue
+	if [ "$(stat -f %Lp "$g")" != 440 ]; then
+		chmod 0440 "$g"
+		say "sudoers.d: set mode 0440 on $g (was required by visudo -c)"
+	fi
+done
+visudo -cq
+say "visudo -c: sudoers OK"
+
+# sysrc rejects dotted names, so edit loader.conf with sed/printf.
+lc=/boot/loader.conf
+want="vfs.zfs.arc.max=\"$arc\""
+if grep -qx "$want" "$lc"; then
+	say "loader.conf already has $want"
+elif grep -q "^vfs\.zfs\.arc\.max=" "$lc"; then
+	cp -p "$lc" "$lc.fbsd-bak"
+	sed -i "" "s/^vfs\.zfs\.arc\.max=.*/$want/" "$lc"
+	say "loader.conf: replaced the old value with $want (backup: $lc.fbsd-bak)"
+else
+	printf "%s\n" "$want" >>"$lc"
+	say "loader.conf: added $want"
+fi
+if sysctl vfs.zfs.arc.max="$arc" >/dev/null 2>&1; then
+	say "ARC max is $(sysctl -n vfs.zfs.arc.max) bytes"
+else
+	say "WARNING: the kernel rejected vfs.zfs.arc.max=$arc (it must be below RAM: $(sysctl -n hw.physmem) bytes); lower FBSD_GUEST_ARC_MAX"
+fi
+
+for d in "$src" "$obj"; do
+	mkdir -p "$d"
+	if [ "$(stat -f %Su:%Sg "$d")" = "$user:$user" ]; then
+		say "$d already owned by $user"
+	else
+		chown "$user:$user" "$d"
+		say "$d now owned by $user:$user"
+	fi
+done
+
+auth=$(sshd -T | awk "tolower(\$1) == \"passwordauthentication\" || tolower(\$1) == \"kbdinteractiveauthentication\" { print \$1 \"=\" \$2 }")
+case $auth in
+*=yes*)
+	cp -p /etc/ssh/sshd_config /etc/ssh/sshd_config.fbsd-bak
+	printf "%s\n" "" "# fbsd vm prep: public key login only" \
+		"PasswordAuthentication no" "KbdInteractiveAuthentication no" \
+		>>/etc/ssh/sshd_config
+	sshd -t
+	service sshd reload
+	say "sshd: password logins disabled (backup: /etc/ssh/sshd_config.fbsd-bak)"
+	;;
+esac
+say "sshd: $(sshd -T | awk "tolower(\$1) == \"passwordauthentication\" || tolower(\$1) == \"kbdinteractiveauthentication\" { printf \"%s=%s \", \$1, \$2 }")"
+'
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+clone_script="src=$(shquote "$FBSD_SRC") url=$(shquote "$FBSD_SRC_URL")"'
+set -eu
+if [ -d "$src/.git" ]; then
+	echo "guest: $src is already a git checkout: $(git -C "$src" log -1 --format="%h %cs")"
+else
+	git clone --origin origin "$url" "$src"
+	echo "guest: cloned $(git -C "$src" log -1 --format="%h %cs %s")"
+fi
+'
+
+is_dryrun || info "step 1-5 as root via $FBSD_GUEST_SU (you may be asked for your guest password once)"
+guest_ssh tty "$FBSD_GUEST_SU /bin/sh -c $(shquote "$root_script")"
+if [ "$skip_clone" = 1 ]; then
+	is_dryrun || info "skipping the source clone (-S)"
+else
+	is_dryrun || info "step 6: git clone $FBSD_SRC_URL into $FBSD_SRC (several GB)"
+	guest_sh tty "$clone_script"
+fi
+is_dryrun || info "guest prepared; check with: fbsd doctor"

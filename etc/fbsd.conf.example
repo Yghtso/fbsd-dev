@@ -28,6 +28,17 @@
 #FBSD_GDB_PORT=1234                           # gdbstub on 127.0.0.1:PORT
 #FBSD_GUEST_SU=sudo                           # sudo or doas
 
+# --- guest preparation (fbsd vm prep) ---
+#FBSD_SRC_URL=https://git.freebsd.org/src.git  # cloned as origin into FBSD_SRC
+#FBSD_GUEST_ARC_MAX=2147483648                 # bytes; vfs.zfs.arc.max in loader.conf
+
+# --- new VMs (fbsd vm create) ---
+#FBSD_IMAGE_URL=https://download.freebsd.org/snapshots/VM-IMAGES/16.0-CURRENT/amd64/Latest
+#FBSD_IMAGE_NAME=FreeBSD-16.0-CURRENT-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz
+#FBSD_DISK_SIZE=86G
+#FBSD_GUEST_PACKAGES='sudo git perl5'           # installed by cloud-init on first boot
+#FBSD_FIRSTBOOT_TIMEOUT=3600                     # first boot also upgrades the base packages
+
 # --- build ---
 #FBSD_SRC=/usr/src
 #FBSD_OBJ=/usr/obj
