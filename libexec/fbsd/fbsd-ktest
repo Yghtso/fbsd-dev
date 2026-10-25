@@ -113,8 +113,8 @@ report() {
 	now=$(crash_bounds)
 	if [ "$now" -gt "$2" ]; then
 		n=$((now - 1))
-		ps=$(guest_ssh probe "sed -n 's/^ *Panic String: //p' /var/crash/info.$n" 2>/dev/null) || ps=''
-		warn "savecore wrote /var/crash/vmcore.$n (panic string: ${ps:-?})"
+		ps=$(guest_ssh probe "$su sed -n 's/^ *Panic String: //p' /var/crash/info.$n" 2>/dev/null) || ps=''
+		warn "savecore wrote /var/crash/vmcore.$n (panic string: ${ps:-?}); summary: /var/crash/core.txt.$n"
 		status=1
 	fi
 	return "$status"

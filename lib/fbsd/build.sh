@@ -113,11 +113,14 @@ console_since() {
 # panic line, the backtrace and the dump lines, and return 0; else return 1.
 panic_report() {
 	_c=$(console_since "$1")
+	# A panic can land right after a "login: " prompt on the same line.
+	_c=$(printf '%s\n' "$_c" | sed 's/^.*login: panic: /panic: /')
 	printf '%s\n' "$_c" | grep -q '^panic: ' || return 1
+	# From the first "panic:" to the dump/reboot/ddb line (at most 60 lines).
 	printf '%s\n' "$_c" | awk '
 		/^panic: / { p = 1 }
-		p && n < 40 { print; n++ }
-		/^Dump complete|^Dump failed|^Automatic reboot|^db> / { if (p) print }
-	' | awk '!seen[$0]++'
+		p { print; n++ }
+		p && (/^Automatic reboot|^db> / || n >= 60) { exit }
+	'
 	return 0
 }

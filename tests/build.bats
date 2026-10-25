@@ -130,10 +130,11 @@ load helper
 	printf 'old boot\r\npanic: old\r\n' >"$FBSD_CONSOLE_LOG"
 	off=$(wc -c <"$FBSD_CONSOLE_LOG")
 	if panic_report "$off"; then false; fi
-	printf 'booting\r\npanic: kdb_sysctl_panic\r\ncpuid = 1\r\nKDB: stack backtrace:\r\n#0 0xffff at kdb_backtrace+0x5d\r\nDump complete\r\n' >>"$FBSD_CONSOLE_LOG"
+	printf 'booting\r\nFreeBSD/amd64 (freebsd) (ttyu0)\r\n\r\nlogin: panic: kdb_sysctl_panic\r\ncpuid = 1\r\nKDB: stack backtrace:\r\n#0 0xffff at kdb_backtrace+0x5d\r\nDump complete\r\nAutomatic reboot in 15 seconds\r\nBdsDxe: loading Boot0002\r\n' >>"$FBSD_CONSOLE_LOG"
 	output=$(panic_report "$off")
 	[[ $output == *"panic: kdb_sysctl_panic"* ]]
 	[[ $output == *"kdb_backtrace"* ]]
 	[[ $output == *"Dump complete"* ]]
 	[[ $output != *"panic: old"* ]]
+	[[ $output != *BdsDxe* ]]
 }
