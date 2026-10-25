@@ -1,0 +1,144 @@
+#!/bin/sh
+# summary: build world, a kernel or a subdirectory in the guest (unprivileged)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+. "$FBSD_ROOT/lib/fbsd/build.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd build [-nf] [-k kernconf] [-j jobs] world|kernel|<subdir> [-- make args]
+
+Build in the guest as FBSD_SSH_USER (never root), in FBSD_SRC with objects
+in FBSD_OBJ (WITH_META_MODE makes rebuilds incremental):
+  world     make buildworld
+  kernel    make buildkernel KERNCONF=<kernconf>
+  <subdir>  make -C FBSD_SRC/<subdir>, with the installed toolchain and
+            headers (e.g. sys/modules/zfs, bin/ls, lib/libc/tests)
+
+The full output is saved on the host in FBSD_LOGDIR/build/; only the
+'>>>' stage lines are shown live (-f shows everything). On failure the
+first error and the last lines of the log are printed.
+
+Before building, the UPDATING entries added since the commit of the last
+successful build are shown (the commit is kept in FBSD_WORKDIR/state).
+
+Options:
+  -n            dry run: print the ssh command and guest script
+  -f            show the full build output live
+  -k kernconf   kernel config (default FBSD_KERNCONF=$FBSD_KERNCONF_HELP)
+  -j jobs       make -j (default FBSD_JOBS)
+  -- args       extra make arguments, after FBSD_MAKE_ARGS
+
+Examples:
+  fbsd build world
+  fbsd build kernel
+  fbsd build -k MYKERNEL kernel -- -DNO_KERNELCLEAN
+  fbsd build sys/modules/if_vtnet
+  fbsd -n build world
+EOF
+}
+
+FBSD_KERNCONF_HELP=${FBSD_KERNCONF:-GENERIC}
+full=0 kernconf='' jobs=''
+while getopts nhfk:j: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	f) full=1 ;;
+	k) kernconf=$OPTARG ;;
+	j)
+		is_uint "$OPTARG" || usage_error "-j needs a number"
+		jobs=$OPTARG
+		;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -gt 0 ] || usage_error "missing target: world, kernel or a subdirectory"
+target=$1
+shift
+[ "${1:-}" != -- ] || shift
+
+fbsd_load_config
+: "${kernconf:=$FBSD_KERNCONF}"
+: "${jobs:=$FBSD_JOBS}"
+case $kernconf in '' | *[!A-Za-z0-9_.-]*) usage_error "invalid kernel config name: $kernconf" ;; esac
+
+case $target in
+world) set -- buildworld "$@" ;;
+kernel) set -- buildkernel "KERNCONF=$kernconf" "$@" ;;
+/* | *..* | -*) usage_error "subdirectory must be relative to FBSD_SRC, without '..': $target" ;;
+*) ;;
+esac
+# shellcheck disable=SC2086 # FBSD_MAKE_ARGS is a list of words on purpose
+set -- -j"$jobs" $FBSD_MAKE_ARGS "$@"
+case $target in
+world | kernel) dir=. ;;
+*) dir=$target ;;
+esac
+
+if ! is_dryrun; then
+	vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	guest_reachable || die "cannot ssh to the guest" "fbsd doctor"
+fi
+
+state=$FBSD_WORKDIR/state/$FBSD_VM_NAME.last-build-rev
+label=$(printf '%s' "$target" | tr '/' '_')
+log=$FBSD_LOGDIR/build/$(date +%Y%m%d-%H%M%S)-$label.log
+
+# UPDATING news since the last successful build.
+if [ -f "$state" ]; then
+	prev=$(cat "$state")
+	case $prev in *[!0-9a-f]*) prev='' ;; esac
+fi
+if [ -n "${prev:-}" ]; then
+	# shellcheck disable=SC2016 # expanded by the guest shell
+	news_script="src=$(shquote "$FBSD_SRC") prev=$(shquote "$prev")"'
+cd "$src"
+git diff --no-color "$prev" HEAD -- UPDATING | sed -n "s/^+//p" | sed "/^++ /d"'
+	if is_dryrun; then
+		guest_sh run "$news_script"
+	else
+		news=$(guest_sh run "$news_script" 2>/dev/null) || news=''
+		if [ -n "$news" ]; then
+			info "new UPDATING entries since the last build ($(printf '%.12s' "$prev")):"
+			printf '%s\n' "$news" | sed 's/^/    /'
+		else
+			info "no new UPDATING entries since the last build ($(printf '%.12s' "$prev"))"
+		fi
+	fi
+else
+	note "no previous build recorded: UPDATING news starts with the next build"
+fi
+
+# shellcheck disable=SC2016 # expanded by the guest shell
+script="src=$(shquote "$FBSD_SRC") dir=$(shquote "$dir")
+set -- $(shquote "$@")"'
+set -eu
+cd "$src"
+echo "fbsd-build-rev=$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+cd "$dir"
+echo ">>> fbsd: make $* in $(pwd) as $(id -un)"
+exec make "$@"'
+
+if [ "$full" = 1 ]; then filter=''; else filter='^>>> '; fi
+is_dryrun || info "building $target in the guest ($FBSD_SRC, -j$jobs)"
+rc=0
+guest_logged "$log" "$filter" "$script" || rc=$?
+if is_dryrun; then
+	note "on success: record the built commit in $state"
+	exit 0
+fi
+[ "$rc" -eq 0 ] || exit "$rc"
+rev=$(sed -n 's/^fbsd-build-rev=//p' "$log" | head -n 1)
+case $rev in
+'' | unknown) ;;
+*)
+	mkdir -p "$(dirname -- "$state")"
+	printf '%s\n' "$rev" >"$state"
+	info "built commit $(printf '%.12s' "$rev")"
+	;;
+esac
