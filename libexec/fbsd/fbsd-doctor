@@ -1,0 +1,190 @@
+#!/bin/sh
+# summary: check host prerequisites and, if the VM runs, the guest (read-only)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd doctor [-n] [-h]
+
+Read-only checks, each with a fix when it fails:
+  host   qemu-system-x86_64, qemu-img, /dev/kvm access, UEFI firmware (if
+         FBSD_FIRMWARE=uefi), ssh, socat, gdb, the VM disk and ssh key,
+         free host ports
+  guest  (only when the VM is running) sshd reachable, the source tree at
+         FBSD_SRC, git, perl, sudo/doas, filemon, WITH_META_MODE, dumpdev,
+         ZFS ARC limit, pool free space
+
+With -n the guest probe is printed (as the exact ssh command) instead of run.
+Exit status: 0 if nothing failed, 1 otherwise. Warnings do not fail.
+
+Examples:
+  fbsd doctor
+  fbsd -n doctor
+EOF
+}
+
+while getopts nh opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+fbsd_load_config
+
+fails=0
+ok() { printf '  ok    %s\n' "$1"; }
+bad() {
+	printf '  FAIL  %s\n' "$1"
+	printf '        fix: %s\n' "$2"
+	fails=$((fails + 1))
+}
+meh() {
+	printf '  warn  %s\n' "$1"
+	[ $# -lt 2 ] || printf '        fix: %s\n' "$2"
+}
+
+# tool name package [warn]: check a host command
+tool() {
+	if p=$(command -v "$1" 2>/dev/null); then
+		ok "$1 ($p)"
+	elif [ $# -ge 3 ]; then
+		meh "$1 not found ($3)" "sudo pacman -S $2"
+	else
+		bad "$1 not found" "sudo pacman -S $2"
+	fi
+}
+
+echo "host:"
+tool qemu-system-x86_64 qemu-base
+tool qemu-img qemu-img
+tool ssh openssh
+tool socat socat
+tool gdb gdb "needed by fbsd gdb"
+tool xz xz "needed by fbsd vm create"
+tool curl curl "needed by fbsd vm create"
+tool xorriso libisoburn "needed by fbsd vm create"
+
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+	ok "/dev/kvm is readable and writable"
+elif [ -e /dev/kvm ]; then
+	bad "/dev/kvm exists but is not read/writable" "sudo usermod -aG kvm $(id -un), then log in again"
+else
+	bad "/dev/kvm missing" "enable virtualization in firmware; sudo modprobe kvm_intel (or kvm_amd)"
+fi
+
+if [ "$FBSD_FIRMWARE" = uefi ]; then
+	for f in "$FBSD_OVMF_CODE" "$FBSD_OVMF_VARS_TEMPLATE"; do
+		if [ -r "$f" ]; then ok "UEFI firmware $f"; else bad "UEFI firmware missing: $f" "sudo pacman -S edk2-ovmf"; fi
+	done
+else
+	ok "firmware: BIOS (FBSD_FIRMWARE=bios)"
+fi
+
+if [ -f "$FBSD_DISK" ]; then
+	ok "disk $FBSD_DISK"
+else
+	bad "disk not found: $FBSD_DISK" "set FBSD_DISK in $FBSD_CONFIG_FILE, or create one with fbsd vm create"
+fi
+if [ -r "$FBSD_SSH_KEY" ]; then
+	ok "ssh key $FBSD_SSH_KEY"
+else
+	bad "ssh key not found: $FBSD_SSH_KEY" "ssh-keygen -t ed25519, or set FBSD_SSH_KEY"
+fi
+
+if pid=$(vm_pid); then
+	ok "VM $FBSD_VM_NAME is running (pid $pid)"
+else
+	for port in "$FBSD_SSH_PORT" "$FBSD_GDB_PORT"; do
+		if port_in_use "$port"; then
+			bad "host port $port is in use" "stop its listener (ss -ltnp) or change FBSD_SSH_PORT/FBSD_GDB_PORT"
+		else
+			ok "host port $port is free"
+		fi
+	done
+	meh "VM $FBSD_VM_NAME is not running, guest checks skipped" "fbsd vm up -w"
+	[ "$fails" -eq 0 ]
+	exit
+fi
+
+# One read-only probe, FreeBSD /bin/sh, prints key=value lines.
+# The single-quoted part is expanded by the guest shell, not here.
+# shellcheck disable=SC2016
+probe="src=$(shquote "$FBSD_SRC")"'
+have() { command -v "$1" >/dev/null 2>&1 && echo yes || echo no; }
+echo "uname=$(uname -r) $(uname -v | awk "{print \$NF}")"
+echo "bootfile=$(sysctl -n kern.bootfile)"
+echo "physmem=$(sysctl -n hw.physmem)"
+echo "arc_max=$(sysctl -n vfs.zfs.arc.max 2>/dev/null || sysctl -n vfs.zfs.arc_max 2>/dev/null)"
+for c in git perl sudo doas kyua; do echo "cmd_$c=$(have "$c")"; done
+if [ -f "$src/Makefile.inc1" ]; then echo src=yes; else echo src=no; fi
+echo "src_rev=$(git -C "$src" log -1 --format="%h %cs %s" 2>/dev/null)"
+echo "src_branch=$(git -C "$src" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+if kldstat -q -m filemon; then echo filemon=yes; else echo filemon=no; fi
+if grep -qs "^WITH_META_MODE" /etc/src-env.conf; then echo meta_mode=yes; else echo meta_mode=no; fi
+echo "dumpdev=$(sysrc -n dumpdev 2>/dev/null)"
+if sudo -n true 2>/dev/null; then echo sudo_nopw=yes; else echo sudo_nopw=no; fi
+if doas -n true 2>/dev/null; then echo doas_nopw=yes; else echo doas_nopw=no; fi
+echo "pool=$(zpool list -H -o name,free,cap 2>/dev/null | head -n 1)"
+'
+
+echo "guest:"
+if is_dryrun; then
+	guest_sh run "$probe"
+	exit 0
+fi
+if ! out=$(guest_ssh probe "/bin/sh -c $(shquote "$probe")" 2>&1); then
+	bad "cannot ssh to $FBSD_SSH_USER@127.0.0.1:$FBSD_SSH_PORT: $(printf '%s' "$out" | tail -n 1)" \
+		"wait for boot (fbsd vm log -t 30), check sshd_enable and your key in ~/.ssh/authorized_keys in the guest"
+	exit 1
+fi
+ok "sshd reachable as $FBSD_SSH_USER"
+val() { printf '%s\n' "$out" | sed -n "s/^$1=//p" | head -n 1; }
+
+ok "kernel $(val uname), booted from $(val bootfile)"
+if [ "$(val src)" = yes ]; then
+	ok "source tree $FBSD_SRC ($(val src_branch): $(val src_rev))"
+else
+	bad "no FreeBSD source tree at $FBSD_SRC" "git clone https://git.FreeBSD.org/src.git $FBSD_SRC in the guest, or set FBSD_SRC"
+fi
+for c in git perl kyua; do
+	if [ "$(val "cmd_$c")" = yes ]; then ok "guest has $c"; else
+		case $c in perl) pkg=perl5 ;; *) pkg=$c ;; esac
+		bad "guest lacks $c" "pkg install $pkg (in the guest, as root)"
+	fi
+done
+su=$FBSD_GUEST_SU
+if [ "$(val "cmd_$su")" = no ]; then
+	bad "guest lacks $su (FBSD_GUEST_SU)" "pkg install $su, or set FBSD_GUEST_SU"
+elif [ "$(val "${su}_nopw")" = yes ]; then
+	ok "$su works without a password"
+else
+	meh "$su asks for a password; installs will prompt" "allow $FBSD_SSH_USER passwordless $su for unattended ktest"
+fi
+if [ "$(val filemon)" = yes ]; then ok "filemon loaded"; else
+	meh "filemon not loaded (WITH_META_MODE needs it)" "sysrc kld_list+=filemon && kldload filemon"
+fi
+if [ "$(val meta_mode)" = yes ]; then ok "WITH_META_MODE in /etc/src-env.conf"; else
+	meh "WITH_META_MODE not set" "echo WITH_META_MODE=yes >> /etc/src-env.conf"
+fi
+dd=$(val dumpdev)
+case $dd in
+'' | NO | no) meh "no dump device (dumpdev=${dd:-unset}): panics leave no vmcore" "sysrc dumpdev=AUTO" ;;
+*) ok "dumpdev=$dd" ;;
+esac
+arc=$(val arc_max) mem=$(val physmem)
+if [ -n "$arc" ] && [ "$arc" != 0 ]; then
+	ok "ZFS ARC max $((arc / 1048576)) MiB of $((mem / 1048576)) MiB RAM"
+else
+	meh "ZFS ARC is not capped (can starve builds)" "add vfs.zfs.arc.max to /boot/loader.conf"
+fi
+ok "pool: $(val pool)"
+
+[ "$fails" -eq 0 ]

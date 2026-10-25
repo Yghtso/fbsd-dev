@@ -1,0 +1,184 @@
+#!/bin/sh
+# summary: start, stop and inspect the VM (up down status console monitor log)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd vm up [-nw]        start QEMU in the background
+       fbsd vm down [-nf]      ACPI power button, wait for the guest to halt
+       fbsd vm status [-n]     running or stopped (exit 0 / 3), sshd state
+       fbsd vm console [-n]    attach to the serial console (Ctrl-] detaches)
+       fbsd vm monitor [-n]    attach to the QEMU monitor (Ctrl-] detaches)
+       fbsd vm log [-n] [-t N] follow the console log (with -t: last N lines)
+
+Options:
+  -n  dry run: print the commands, change nothing
+  -w  (up) wait until sshd answers, up to FBSD_BOOT_TIMEOUT seconds
+  -f  (down) force: quit QEMU at once, like pulling the plug
+  -t  (log) print the last N lines instead of following
+
+The VM uses KVM, FBSD_CPUS/FBSD_MEM, UEFI or BIOS (FBSD_FIRMWARE), ssh on
+127.0.0.1:FBSD_SSH_PORT and a gdbstub on 127.0.0.1:FBSD_GDB_PORT.
+No network access is made by these commands.
+
+Examples:
+  fbsd -n vm up          show the exact qemu-system-x86_64 command
+  fbsd vm up -w && fbsd ssh
+  fbsd vm down
+EOF
+}
+
+[ $# -gt 0 ] || usage_error "missing subcommand"
+sub=$1
+shift
+case $sub in
+-h | help) usage && exit 0 ;;
+up | down | status | console | monitor | log) ;;
+*) usage_error "unknown vm subcommand: $sub" ;;
+esac
+
+wait_flag=0 force=0 tail_lines=''
+while getopts nhwft: opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	w) [ "$sub" = up ] || usage_error "-w only applies to 'vm up'"; wait_flag=1 ;;
+	f) [ "$sub" = down ] || usage_error "-f only applies to 'vm down'"; force=1 ;;
+	t)
+		[ "$sub" = log ] || usage_error "-t only applies to 'vm log'"
+		is_uint "$OPTARG" || usage_error "-t needs a number"
+		tail_lines=$OPTARG
+		;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+fbsd_load_config
+
+vm_up() {
+	if pid=$(vm_pid); then
+		info "VM $FBSD_VM_NAME is already running (pid $pid)"
+		return 0
+	fi
+	need_cmd qemu-system-x86_64 qemu-base
+	[ -f "$FBSD_DISK" ] ||
+		die "disk not found: $FBSD_DISK" "set FBSD_DISK in $FBSD_CONFIG_FILE"
+	[ -r /dev/kvm ] && [ -w /dev/kvm ] ||
+		die "no read/write access to /dev/kvm" \
+			"check that the kvm module is loaded and you are in group kvm"
+	for port in "$FBSD_SSH_PORT" "$FBSD_GDB_PORT"; do
+		if port_in_use "$port"; then
+			die "port $port is already in use on the host" \
+				"stop whatever listens there (ss -ltnp) or change FBSD_SSH_PORT/FBSD_GDB_PORT"
+		fi
+	done
+	if [ "$FBSD_FIRMWARE" = uefi ]; then
+		[ -r "$FBSD_OVMF_CODE" ] ||
+			die "UEFI firmware not found: $FBSD_OVMF_CODE" \
+				"sudo pacman -S edk2-ovmf, or set FBSD_FIRMWARE=bios"
+		if [ ! -f "$FBSD_OVMF_VARS" ]; then
+			[ -r "$FBSD_OVMF_VARS_TEMPLATE" ] ||
+				die "UEFI vars template not found: $FBSD_OVMF_VARS_TEMPLATE" \
+					"sudo pacman -S edk2-ovmf"
+			run mkdir -p "$(dirname -- "$FBSD_OVMF_VARS")"
+			run cp "$FBSD_OVMF_VARS_TEMPLATE" "$FBSD_OVMF_VARS"
+		fi
+	fi
+	run mkdir -p -m 700 "$FBSD_VMRUN"
+	run mkdir -p "$FBSD_LOGDIR"
+	# Sockets left over from a crashed QEMU; only our own run directory.
+	run rm -f "$FBSD_SERIAL_SOCK" "$FBSD_MONITOR_SOCK"
+	qemu_up
+	is_dryrun || info "VM $FBSD_VM_NAME started (pid $(vm_pid || echo '?')); console: fbsd vm console, ssh: fbsd ssh"
+	if [ "$wait_flag" = 1 ]; then
+		is_dryrun || info "waiting for sshd (up to $FBSD_BOOT_TIMEOUT s)"
+		wait_ssh "$FBSD_BOOT_TIMEOUT" ||
+			die "sshd did not answer within $FBSD_BOOT_TIMEOUT s" \
+				"look at the boot with: fbsd vm log -t 50"
+		is_dryrun || info "sshd is up"
+	fi
+}
+
+# wait_stopped seconds: poll until QEMU exits.
+wait_stopped() {
+	note "wait up to $1 s for QEMU (pid from $FBSD_PIDFILE) to exit"
+	is_dryrun && return 0
+	t=0
+	while vm_running; do
+		[ "$t" -lt "$1" ] || return 1
+		t=$((t + 1))
+		sleep 1
+	done
+}
+
+vm_down() {
+	if ! pid=$(vm_pid); then
+		if is_dryrun; then
+			note "VM $FBSD_VM_NAME is not running; nothing to do"
+		else
+			info "VM $FBSD_VM_NAME is already stopped"
+		fi
+		return 0
+	fi
+	need_cmd socat socat
+	if [ "$force" = 1 ]; then
+		monitor_cmd quit
+		wait_stopped 10 || {
+			run kill "$pid"
+		}
+		is_dryrun || info "QEMU quit (forced)"
+		return 0
+	fi
+	monitor_cmd system_powerdown
+	is_dryrun || info "ACPI power button sent; waiting up to $FBSD_SHUTDOWN_TIMEOUT s"
+	if wait_stopped "$FBSD_SHUTDOWN_TIMEOUT"; then
+		is_dryrun || info "VM $FBSD_VM_NAME stopped"
+	else
+		die "VM still running after $FBSD_SHUTDOWN_TIMEOUT s" \
+			"check 'fbsd vm console'; if it is hung, 'fbsd vm down -f'"
+	fi
+}
+
+vm_status() {
+	if pid=$(vm_pid); then
+		if guest_reachable; then ssh_state=up; else ssh_state=down; fi
+		printf 'running (pid %s)\n' "$pid"
+		printf '  ssh      127.0.0.1:%s (sshd %s)\n' "$FBSD_SSH_PORT" "$ssh_state"
+		printf '  gdb      127.0.0.1:%s\n' "$FBSD_GDB_PORT"
+		printf '  console  %s\n' "$FBSD_CONSOLE_LOG"
+		printf '  disk     %s\n' "$FBSD_DISK"
+		return 0
+	fi
+	printf 'stopped\n'
+	exit 3
+}
+
+case $sub in
+up) vm_up ;;
+down) vm_down ;;
+status) vm_status ;;
+console)
+	vm_running || is_dryrun || die "VM $FBSD_VM_NAME is not running" "fbsd vm up"
+	is_dryrun || info "serial console; press Enter for a prompt, Ctrl-] to detach"
+	socket_attach "$FBSD_SERIAL_SOCK"
+	;;
+monitor)
+	vm_running || is_dryrun || die "VM $FBSD_VM_NAME is not running" "fbsd vm up"
+	is_dryrun || info "QEMU monitor; Ctrl-] to detach"
+	socket_attach "$FBSD_MONITOR_SOCK"
+	;;
+log)
+	[ -f "$FBSD_CONSOLE_LOG" ] || is_dryrun ||
+		die "no console log yet: $FBSD_CONSOLE_LOG" "start the VM with fbsd vm up"
+	if [ -n "$tail_lines" ]; then
+		run_exec tail -n "$tail_lines" "$FBSD_CONSOLE_LOG"
+	fi
+	run_exec less +F "$FBSD_CONSOLE_LOG"
+	;;
+esac

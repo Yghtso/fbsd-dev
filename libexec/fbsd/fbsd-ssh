@@ -1,0 +1,43 @@
+#!/bin/sh
+# summary: ssh into the guest (shared ControlMaster connection)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd ssh [-n] [--] [command [args...]]
+
+Open a shell in the guest, or run a command there. The first call opens a
+ControlMaster connection kept for 10 minutes, so later calls are instant.
+Like plain ssh, the remote arguments are joined with spaces and parsed again
+by the guest shell: quote accordingly.
+
+Uses FBSD_SSH_USER@127.0.0.1:FBSD_SSH_PORT with FBSD_SSH_KEY, and a private
+known_hosts in FBSD_WORKDIR (host key alias FBSD_VM_NAME).
+
+Examples:
+  fbsd ssh
+  fbsd ssh uname -a
+  fbsd ssh 'cd /usr/src && git log -1 --oneline'
+  fbsd -n ssh sysctl kern.bootfile
+EOF
+}
+
+while getopts nh opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+
+fbsd_load_config
+need_cmd ssh openssh
+[ -r "$FBSD_SSH_KEY" ] || is_dryrun ||
+	die "ssh key not found: $FBSD_SSH_KEY" "set FBSD_SSH_KEY or create one with ssh-keygen -t ed25519"
+[ -d "$FBSD_VMRUN" ] || run mkdir -p -m 700 "$FBSD_VMRUN"
+[ -d "$FBSD_WORKDIR" ] || run mkdir -p "$FBSD_WORKDIR"
+guest_ssh exec "$@"
