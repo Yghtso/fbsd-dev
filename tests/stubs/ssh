@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test stub: records its arguments, exits with $STUB_SSH_RC (default 255).
+printf 'ssh %s\n' "$*" >>"${STUB_LOG:?}"
+exit "${STUB_SSH_RC:-255}"

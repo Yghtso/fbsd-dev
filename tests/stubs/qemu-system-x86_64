@@ -1,0 +1,15 @@
+#!/bin/sh
+# Test stub: records its arguments; with -daemonize -pidfile F it leaves a
+# sleeping process whose command line contains F, like the real QEMU.
+printf '%s\n' "$*" >>"${STUB_LOG:?}"
+pidfile=''
+while [ $# -gt 0 ]; do
+	[ "$1" = -pidfile ] && pidfile=$2
+	shift
+done
+if [ -n "$pidfile" ]; then
+	# '; :' keeps sh from exec'ing sleep, so the pidfile stays in argv.
+	# fd 3 is closed so bats does not wait for this process.
+	sh -c 'sleep 300; :' qemu-stub "$pidfile" </dev/null >/dev/null 2>&1 3>&- &
+	echo $! >"$pidfile"
+fi

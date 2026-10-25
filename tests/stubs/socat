@@ -1,0 +1,8 @@
+#!/bin/sh
+# Test stub: records the monitor command; on quit/system_powerdown it stops
+# the fake QEMU from $STUB_PIDFILE.
+cmd=$(cat)
+printf 'socat %s <<< %s\n' "$*" "$cmd" >>"${STUB_LOG:?}"
+case $cmd in
+quit | system_powerdown) kill "$(cat "${STUB_PIDFILE:?}")" ;;
+esac
