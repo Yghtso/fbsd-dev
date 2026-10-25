@@ -165,6 +165,9 @@ for kv in ntpd_enable=YES ntpd_sync_on_start=YES dumpon_flags=-Z; do
 done
 service ntpd status >/dev/null 2>&1 || service ntpd start
 say "ntpd: $(service ntpd status 2>&1 | head -n 1)"
+# dumpon adds to a list of dump devices: clear it first, so re-running
+# replaces the old (uncompressed) entry instead of adding a second one.
+dumpon off
 service dumpon start >/dev/null
 say "dump device: $(dumpon -l) (dumpon_flags=$(sysrc -n dumpon_flags))"
 
