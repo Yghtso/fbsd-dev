@@ -89,3 +89,12 @@ need_cmd() {
 is_uint() {
 	case $1 in '' | *[!0-9]*) return 1 ;; esac
 }
+
+# write_file path content: create a file; under -n/-v it is shown as a
+# here-document, so the dry run stays a runnable script.
+write_file() {
+	show_cmd "cat >$(shquote "$1") <<'FBSD_EOF'
+$2
+FBSD_EOF"
+	is_dryrun || printf '%s\n' "$2" >"$1"
+}

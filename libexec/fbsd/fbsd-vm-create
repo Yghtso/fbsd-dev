@@ -1,0 +1,216 @@
+#!/bin/sh
+# summary: create the VM disk from an official CURRENT image (cloud-init)
+set -eu
+. "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
+. "$FBSD_ROOT/lib/fbsd/config.sh"
+. "$FBSD_ROOT/lib/fbsd/qemu.sh"
+. "$FBSD_ROOT/lib/fbsd/guest.sh"
+
+usage() {
+	cat <<EOF
+usage: fbsd vm create [-nfPS] [-h]
+
+Create FBSD_DISK from an official FreeBSD VM image. Network access: downloads
+CHECKSUM.SHA256 and FBSD_IMAGE_NAME from FBSD_IMAGE_URL (the image is kept in
+FBSD_WORKDIR/images and reused while its checksum still matches).
+
+Steps:
+  1. download CHECKSUM.SHA256 and the image (curl, resumable)
+  2. verify: the image's SHA256 must appear in CHECKSUM.SHA256; the matching
+     dated name is recorded in FBSD_DISK.source
+  3. xz -dk, qemu-img amend to compat 1.1 if needed, qemu-img resize to
+     FBSD_DISK_SIZE, move into place as FBSD_DISK
+  4. cloud-init (default, BASIC-CLOUDINIT image): build a NoCloud seed ISO
+     (label CIDATA) with xorriso: user FBSD_SSH_USER with your public key,
+     NOPASSWD sudo, no password logins (also none for root, whose
+     password is empty in the official image), packages FBSD_GUEST_PACKAGES,
+     serial console, ARC cap, WITH_META_MODE, filemon, dumpdev=AUTO
+  5. first boot with the seed attached (the image's first-boot scripts
+     also upgrade the base packages: slow), wait up to FBSD_FIRSTBOOT_TIMEOUT
+     for sshd and for the end of the first-boot rc scripts, then run
+     'fbsd vm prep'
+     (sshd hardening, /usr/src and /usr/obj ownership, src clone)
+
+Options:
+  -n  dry run: print every command and the seed files, change nothing
+  -f  overwrite an existing FBSD_DISK (destroys it, with its snapshots)
+  -S  pass -S to 'fbsd vm prep': skip the source clone
+  -P  plain image fallback: FBSD_IMAGE_NAME defaults to the non-cloud-init
+      zfs image, steps 4-5 are skipped; set up root, your user and sshd by
+      hand on 'fbsd vm console', then run 'fbsd vm prep'
+
+To refresh to a newer snapshot without touching your current disk, create
+a second disk:
+  FBSD_DISK=~/.local/share/fbsd/fbsd-new.qcow2 fbsd vm create
+
+Examples:
+  fbsd -n vm create
+  FBSD_DISK=/tmp/try.qcow2 fbsd vm create
+EOF
+}
+
+force=0 plain=0 prep_opts=''
+while getopts nhfPS opt; do
+	case $opt in
+	n) FBSD_DRYRUN=1 ;;
+	h) usage && exit 0 ;;
+	f) force=1 ;;
+	P) plain=1 ;;
+	S) prep_opts=-S ;;
+	*) usage_error "unknown option" ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_error "unexpected argument: $1"
+
+if [ "$plain" = 1 ] && [ -z "${FBSD_IMAGE_NAME:-}" ]; then
+	FBSD_IMAGE_NAME=FreeBSD-16.0-CURRENT-amd64-zfs.qcow2.xz
+	export FBSD_IMAGE_NAME
+fi
+fbsd_load_config
+
+need_cmd curl curl
+need_cmd xz xz
+need_cmd sha256sum coreutils
+need_cmd qemu-img qemu-img
+[ "$plain" = 1 ] || need_cmd xorriso libisoburn
+case $FBSD_IMAGE_NAME in
+*.qcow2.xz) ;;
+*) die "FBSD_IMAGE_NAME must be a .qcow2.xz image, got $FBSD_IMAGE_NAME" ;;
+esac
+pubkey=$FBSD_SSH_KEY.pub
+[ "$plain" = 1 ] || [ -r "$pubkey" ] || is_dryrun ||
+	die "public key not found: $pubkey" "ssh-keygen -y -f $FBSD_SSH_KEY > $pubkey"
+
+if vm_running; then
+	die "VM $FBSD_VM_NAME is running" "fbsd vm down, or use another FBSD_VM_NAME"
+fi
+if [ -e "$FBSD_DISK" ] && [ "$force" != 1 ]; then
+	die "disk already exists: $FBSD_DISK" \
+		"add -f to replace it (its snapshots are lost too), or set FBSD_DISK to a new path"
+fi
+
+images=$FBSD_WORKDIR/images
+xzfile=$images/$FBSD_IMAGE_NAME
+sums=$images/CHECKSUM.SHA256
+raw=${xzfile%.xz}
+tmpdisk=$FBSD_DISK.creating
+
+run mkdir -p "$images" "$(dirname -- "$FBSD_DISK")"
+
+# 1. download. The checksum file is always fetched again: it is small and
+# tells us whether the image we keep is still the current snapshot.
+info "downloading checksums and image from $FBSD_IMAGE_URL"
+run curl -fL --proto =https -o "$sums" "$FBSD_IMAGE_URL/CHECKSUM.SHA256"
+
+# image_name_for_hash: print the dated name whose SHA256 matches $xzfile.
+image_name_for_hash() {
+	_h=$(sha256sum "$xzfile" | awk '{print $1}')
+	awk -v h="$_h" '$NF == h { gsub(/^\(|\)$/, "", $2); print $2; exit }' "$sums"
+}
+
+if [ -f "$xzfile" ] && ! is_dryrun && [ -n "$(image_name_for_hash)" ]; then
+	info "cached image $xzfile still matches CHECKSUM.SHA256"
+else
+	# A stalled transfer (under 1 KiB/s for 60 s) is retried and resumed.
+	run curl -fL --proto =https --retry 5 --retry-delay 5 --speed-limit 1024 --speed-time 60 -C - -o "$xzfile" "$FBSD_IMAGE_URL/$FBSD_IMAGE_NAME"
+fi
+
+# 2. verify
+note "verify: sha256sum $xzfile must match a line of $sums"
+if ! is_dryrun; then
+	dated=$(image_name_for_hash)
+	if [ -z "$dated" ]; then
+		run rm -f "$xzfile"
+		die "checksum mismatch: $xzfile is not in $sums (removed it)" "run fbsd vm create again"
+	fi
+	info "verified: $dated"
+fi
+
+# 3. disk
+run xz -dkf "$xzfile"
+run mv -f "$raw" "$tmpdisk"
+if is_dryrun || qemu-img info "$tmpdisk" | grep -q 'compat: 0.10'; then
+	run qemu-img amend -f qcow2 -o compat=1.1 "$tmpdisk"
+fi
+run qemu-img resize -f qcow2 "$tmpdisk" "$FBSD_DISK_SIZE"
+run mv -f "$tmpdisk" "$FBSD_DISK"
+write_file "$FBSD_DISK.source" "${dated:-<dated image name>} from $FBSD_IMAGE_URL, created $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# A new VM has new host keys: forget the old ones (our own known_hosts only).
+if [ -f "$FBSD_WORKDIR/known_hosts" ]; then
+	run ssh-keygen -R "$FBSD_VM_NAME" -f "$FBSD_WORKDIR/known_hosts"
+fi
+info "disk ready: $FBSD_DISK ($FBSD_DISK_SIZE)"
+
+if [ "$plain" = 1 ]; then
+	info "plain image: boot with 'fbsd vm up' and set up root, $FBSD_SSH_USER and sshd on 'fbsd vm console', then 'fbsd vm prep'"
+	exit 0
+fi
+
+# 4. cloud-init seed
+seeddir=$FBSD_WORKDIR/seed/$FBSD_VM_NAME
+iso=$FBSD_WORKDIR/seed/$FBSD_VM_NAME.iso
+if is_dryrun && [ ! -r "$pubkey" ]; then key='<contents of '"$pubkey"'>'; else key=$(cat "$pubkey"); fi
+case $key in *'"'* | *\\*) die "unexpected quote or backslash in $pubkey" ;; esac
+pkgs=''
+for p in $FBSD_GUEST_PACKAGES; do pkgs="$pkgs
+  - $p"; done
+
+run mkdir -p "$seeddir"
+write_file "$seeddir/meta-data" "instance-id: $FBSD_VM_NAME-$(date +%Y%m%d%H%M%S)
+local-hostname: $FBSD_VM_NAME"
+# passwd "*" means "no password login" without locking the account: sshd
+# refuses even key logins for a locked account (pw lock, lock_passwd).
+write_file "$seeddir/user-data" "#cloud-config
+hostname: $FBSD_VM_NAME
+ssh_pwauth: false
+disable_root: true
+users:
+  - name: $FBSD_SSH_USER
+    gecos: FreeBSD developer
+    groups: [wheel]
+    shell: /bin/sh
+    passwd: \"*\"
+    sudo: \"ALL=(ALL) NOPASSWD:ALL\"
+    ssh_authorized_keys:
+      - \"$key\"
+package_update: true
+packages:$pkgs
+write_files:
+  - path: /etc/src-env.conf
+    content: |
+      WITH_META_MODE=yes
+  - path: /boot/loader.conf
+    append: true
+    content: |
+      console=\"comconsole\"
+      vfs.zfs.arc.max=\"$FBSD_GUEST_ARC_MAX\"
+runcmd:
+  - sysrc kld_list+=filemon
+  - kldload -n filemon
+  - sysrc dumpdev=AUTO
+  - \"echo '*' | pw usermod -n root -H 0\""
+run xorriso -as mkisofs -quiet -output "$iso" -volid CIDATA -joliet -rock "$seeddir"
+
+# 5. first boot with the seed, then the shared guest preparation
+FBSD_SEED_ISO=$iso
+export FBSD_SEED_ISO
+# The first boot also upgrades the pkgbase base system (firstboot rc scripts
+# of the image), which takes a long time: use FBSD_FIRSTBOOT_TIMEOUT.
+FBSD_BOOT_TIMEOUT=$FBSD_FIRSTBOOT_TIMEOUT
+export FBSD_BOOT_TIMEOUT
+info "first boot: cloud-init and a base upgrade run now; waiting up to $FBSD_FIRSTBOOT_TIMEOUT s"
+run "$FBSD_ROOT/bin/fbsd" vm up -w
+note "wait until the guest has removed /firstboot (end of first-boot rc scripts)"
+if ! is_dryrun; then
+	t=0
+	until guest_ssh probe 'test ! -e /firstboot' >/dev/null 2>&1; do
+		t=$((t + 5))
+		[ "$t" -lt "$FBSD_BOOT_TIMEOUT" ] ||
+			die "first boot did not finish within $FBSD_BOOT_TIMEOUT s" "fbsd vm log -t 50; /var/log/nuageinit.log in the guest"
+		sleep 5
+	done
+	info "first boot finished"
+fi
+run "$FBSD_ROOT/bin/fbsd" vm prep ${prep_opts:+"$prep_opts"}
+info "VM $FBSD_VM_NAME created; the seed is not attached on later boots"

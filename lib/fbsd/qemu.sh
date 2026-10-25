@@ -34,7 +34,12 @@ qemu_up() {
 			-drive "if=pflash,format=raw,unit=1,file=$FBSD_OVMF_VARS"
 	fi
 	set -- "$@" \
-		-drive "file=$FBSD_DISK,if=virtio,format=qcow2,cache=writeback" \
+		-drive "file=$FBSD_DISK,if=virtio,format=qcow2,cache=writeback"
+	# First boot of `vm create` only: the cloud-init NoCloud seed.
+	if [ -n "${FBSD_SEED_ISO:-}" ]; then
+		set -- "$@" -drive "file=$FBSD_SEED_ISO,media=cdrom,readonly=on,format=raw"
+	fi
+	set -- "$@" \
 		-netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$FBSD_SSH_PORT-:22" \
 		-device virtio-net-pci,netdev=n0 \
 		-device virtio-rng-pci \
