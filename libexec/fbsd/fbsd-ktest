@@ -12,8 +12,11 @@ usage() {
 usage: fbsd ktest [-nI] [-d|--ddb] [-k kernconf] [-x command]
 
 Boot a freshly built kernel once, without ever touching /boot/kernel:
-  1. make installkernel KERNCONF=<kernconf> KODIR=/boot/FBSD_TESTKERNEL
-     (as root through FBSD_GUEST_SU; the build itself is 'fbsd build kernel')
+  1. make installkernel KERNCONF=<kernconf> INSTKERNNAME=FBSD_TESTKERNEL
+     which installs to KODIR=/boot/FBSD_TESTKERNEL (as root through
+     FBSD_GUEST_SU; the build itself is 'fbsd build kernel'). INSTKERNNAME,
+     not KODIR, is what Makefile.inc1's pkgbase safety check looks at: it
+     refuses to overwrite a kernel that pkg owns, such as /boot/kernel here
   2. nextboot -k FBSD_TESTKERNEL   (one boot only; nextboot(8))
   3. shutdown -r now, wait for sshd, then report uname -v and whether the
      test kernel (kern.bootfile) or the fallback /boot/kernel booted
@@ -120,10 +123,10 @@ report() {
 log=$FBSD_LOGDIR/build/$(date +%Y%m%d-%H%M%S)-ktest-install.log
 if [ "$install" = 1 ]; then
 	# shellcheck disable=SC2016 # expanded by the guest shell
-	script="src=$(shquote "$FBSD_SRC") kernconf=$(shquote "$kernconf") kodir=$(shquote "$kodir") su=$(shquote "$su")"'
+	script="src=$(shquote "$FBSD_SRC") kernconf=$(shquote "$kernconf") name=$(shquote "$FBSD_TESTKERNEL") su=$(shquote "$su")"'
 set -eu
-echo ">>> fbsd: $su make -C $src installkernel KERNCONF=$kernconf KODIR=$kodir"
-$su make -C "$src" installkernel KERNCONF="$kernconf" KODIR="$kodir"'
+echo ">>> fbsd: $su make -C $src installkernel KERNCONF=$kernconf INSTKERNNAME=$name"
+$su make -C "$src" installkernel KERNCONF="$kernconf" INSTKERNNAME="$name"'
 	is_dryrun || info "installing $kernconf into $kodir"
 	guest_logged "$log" '^>>> ' "$script"
 fi

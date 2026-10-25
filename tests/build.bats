@@ -11,7 +11,7 @@ load helper
 	[[ $output == *'exec make "$@"'* ]]
 	[[ $output != *"sudo"* ]]
 	[[ $output == *"follow: copy /var/tmp/fbsd-job/log to $XDG_DATA_HOME/fbsd/log/build/"*"-world.log"* ]]
-	[[ $output == *'daemon -p "$d/pid" -o "$d/log"'* ]]
+	[[ $output == *'daemon -f -p "$d/pid" -o "$d/log"'* ]]
 	run "$FBSD" -n build -k MYKERNEL -j 3 kernel -- -DNO_KERNELCLEAN
 	[[ $output == *"set -- -j3 buildkernel KERNCONF=MYKERNEL -DNO_KERNELCLEAN"* ]]
 	FBSD_MAKE_ARGS='-DWITHOUT_TESTS -s' run "$FBSD" -n build sys/modules/if_vtnet
@@ -55,8 +55,8 @@ load helper
 @test "ktest -n: KODIR, nextboot -k, reboot, report" {
 	run "$FBSD" -n ktest
 	[ "$status" -eq 0 ]
-	[[ $output == *'installkernel KERNCONF="$kernconf" KODIR="$kodir"'* ]]
-	[[ $output == *"kodir=/boot/kernel.test"* ]]
+	[[ $output == *'installkernel KERNCONF="$kernconf" INSTKERNNAME="$name"'* ]]
+	[[ $output == *"name=kernel.test"* ]]
 	[[ $output == *"'sudo nextboot -k kernel.test'"* ]]
 	[[ $output == *"'sudo shutdown -r now'"* ]]
 	[[ $output == *"kern.bootfile"* ]]

@@ -27,7 +27,7 @@ rm -rf "$d"
 mkdir -p "$d"
 printf "%s\n" "$script" >"$d/script.sh"
 printf "%s\n" "$hostlog" >"$d/hostlog"
-daemon -p "$d/pid" -o "$d/log" /bin/sh -c "/bin/sh $d/script.sh; echo \$? >$d/rc.tmp; mv $d/rc.tmp $d/rc"'
+daemon -f -p "$d/pid" -o "$d/log" /bin/sh -c "/bin/sh $d/script.sh; echo \$? >$d/rc.tmp; mv $d/rc.tmp $d/rc"'
 	if is_dryrun; then
 		guest_sh run "$_start"
 		note "follow: copy $FBSD_GUEST_JOBDIR/log to $_log every 3 s until $FBSD_GUEST_JOBDIR/rc exists"
