@@ -1,5 +1,5 @@
 #!/bin/sh
-# summary: start, stop and inspect the VM (up down status console monitor log)
+# summary: start, stop and inspect the VM (up down reboot status console monitor log)
 set -eu
 . "${FBSD_ROOT:?run this through bin/fbsd}/lib/fbsd/common.sh"
 . "$FBSD_ROOT/lib/fbsd/config.sh"
@@ -10,6 +10,7 @@ usage() {
 	cat <<EOF
 usage: fbsd vm up [-nw]        start QEMU in the background
        fbsd vm down [-nf]      ACPI power button, wait for the guest to halt
+       fbsd vm reboot [-n]     shutdown -r now in the guest, wait for sshd
        fbsd vm status [-n]     running or stopped (exit 0 / 3), sshd state
        fbsd vm console [-n]    attach to the serial console (Ctrl-] detaches)
        fbsd vm monitor [-n]    attach to the QEMU monitor (Ctrl-] detaches)
@@ -37,7 +38,7 @@ sub=$1
 shift
 case $sub in
 -h | help) usage && exit 0 ;;
-up | down | status | console | monitor | log) ;;
+up | down | reboot | status | console | monitor | log) ;;
 *) usage_error "unknown vm subcommand: $sub" ;;
 esac
 
@@ -164,6 +165,14 @@ case $sub in
 up) vm_up ;;
 down) vm_down ;;
 status) vm_status ;;
+reboot)
+	if ! is_dryrun; then
+		vm_running || die "VM $FBSD_VM_NAME is not running" "fbsd vm up -w"
+	fi
+	is_dryrun || info "rebooting the guest"
+	guest_reboot
+	is_dryrun || info "guest is back: $(guest_ssh probe 'uname -v' 2>/dev/null || :)"
+	;;
 console)
 	vm_running || is_dryrun || die "VM $FBSD_VM_NAME is not running" "fbsd vm up"
 	is_dryrun || info "serial console; press Enter for a prompt, Ctrl-] to detach"
