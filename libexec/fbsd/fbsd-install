@@ -90,7 +90,7 @@ echo "fbsd-new-be=$new"
 bectl list')"
 
 is_dryrun || info "installing into a new boot environment (log on the host)"
-guest_logged "$log" '^>>> |^Boot environment|^fbsd' "$script"
+guest_logged "$log" '^>>> |^Boot environment |^fbsd-new-be=|^fbsd: ' "$script"
 if is_dryrun; then
 	[ "$reboot" = 0 ] || guest_reboot
 	exit 0
